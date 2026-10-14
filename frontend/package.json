@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0 --port 3000",
     "build": "next build",
-    "start": "next start --hostname 0.0.0.0 --port 3000"
+    "start": "next start --hostname 0.0.0.0 --port 3000",
+    "test:chat-stages": "node --experimental-vm-modules src/lib/chatStages.test.mjs",
+    "test:chat-helpers": "node --experimental-vm-modules src/lib/chatConsoleHelpers.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.42.0",

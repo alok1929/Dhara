@@ -1,10 +1,16 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { ArrowLeft, ArrowRight, Check, Download, Loader2, Search, Sparkles, X } from 'lucide-react'
 import { withAuthHeaders } from '../../lib/auth'
 import { withLlmKeyHeaders } from '../../lib/llmKey'
+import { runPdfJobTableAiSearch } from '../../lib/chatTableAiSearch'
+import {
+  catalogRowsForAiSearch,
+  createPreviewAiFindFilter,
+  isPreviewAiFindActive,
+} from '../../lib/tablePreviewFilter'
 import Badge from '../ui/Badge'
 import Button from '../ui/Button'
 import ErrorBanner from '../ui/ErrorBanner'
@@ -103,7 +109,28 @@ export function PdfTableEditorPage({ jobId, tableId }) {
   )
 }
 
-export default function PdfReview({ jobId, filename, onDone }) {
+function ReviewChrome({ jobId, embedded, step, maxStepReached, children }) {
+  if (embedded) {
+    return <div className="flex min-h-0 flex-col gap-3">{children}</div>
+  }
+  return (
+    <PdfConsoleLayout jobId={jobId} step={step} maxStepReached={maxStepReached}>
+      {children}
+    </PdfConsoleLayout>
+  )
+}
+
+// compact: chat panel density; previewAiFilter: chat-owned find filter (tablePreviewFilter.js)
+const PdfReview = forwardRef(function PdfReview({
+  jobId,
+  filename,
+  onDone,
+  embedded = false,
+  compact = false,
+  previewAiFilter = null,
+  onPreviewAiFilterChange = null,
+  onContinueToGrouping = null,
+}, ref) {
   const [tables, setTables] = useState(null)
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(null)
@@ -131,6 +158,14 @@ export default function PdfReview({ jobId, filename, onDone }) {
   const [downloadingId, setDownloadingId] = useState(null)
   const rootRef = useRef(null)
   const router = useRouter()
+  const previewFilterControlled = typeof onPreviewAiFilterChange === 'function'
+
+  useEffect(() => {
+    if (!previewFilterControlled || !isPreviewAiFindActive(previewAiFilter)) return
+    if (previewAiFilter.prompt) {
+      setTableSearch(previewAiFilter.prompt)
+    }
+  }, [previewFilterControlled, previewAiFilter])
 
   const triggerBlobDownload = async (url, fallbackName, init = {}) => {
     const res = await fetch(url, withAuthHeaders(init))
@@ -194,7 +229,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
     }
   }
 
-  const continueToGrouping = async () => {
+  const continueToGrouping = useCallback(async () => {
     setContinuing(true)
     setContinuePhase('persist')
     setError('')
@@ -227,20 +262,28 @@ export default function PdfReview({ jobId, filename, onDone }) {
           }),
         })),
       )
+      const persistData = await res.json().catch(() => ({}))
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(typeof body.detail === 'string' ? body.detail : 'Could not save tables for grouping')
+        throw new Error(typeof persistData.detail === 'string' ? persistData.detail : 'Could not save tables for grouping')
       }
       clearTimeout(phaseTimer)
       setContinuePhase('group')
-      router.push(`/console/grouping/${jobId}`)
+      if (embedded && onContinueToGrouping) {
+        await onContinueToGrouping(jobId, persistData)
+        setContinuing(false)
+        setContinuePhase('persist')
+      } else {
+        router.push(`/console/grouping/${jobId}`)
+      }
     } catch (e) {
       clearTimeout(phaseTimer)
       setError(e.message || 'Could not continue to grouping')
       setContinuing(false)
       setContinuePhase('persist')
     }
-  }
+  }, [embedded, jobId, onContinueToGrouping, router, tables])
+
+  useImperativeHandle(ref, () => ({ continueToGrouping }), [continueToGrouping])
 
   useEffect(() => {
     let cancelled = false
@@ -368,6 +411,9 @@ export default function PdfReview({ jobId, filename, onDone }) {
   }
 
   const clearAiSearch = ({ keepSelectMode = false } = {}) => {
+    if (previewFilterControlled) {
+      onPreviewAiFilterChange(null)
+    }
     setAiMatchIds(null)
     setAiIntent(null)
     setAiRationale('')
@@ -384,39 +430,44 @@ export default function PdfReview({ jobId, filename, onDone }) {
     setAiSearching(true)
     setError('')
     try {
-      const res = await fetch(
-        `/api/pdf/jobs/${jobId}/tables/ai-search`,
-        withLlmKeyHeaders(withAuthHeaders({
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt,
-            tables: tables.map((t) => ({
-              table_id: t.table_id,
-              title: t.title ?? null,
-              banner_table_id: t.banner_table_id ?? null,
-              page: t.page,
-              short_description: t.short_description ?? t.description ?? null,
-            })),
-          }),
-        })),
-      )
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(typeof body.detail === 'string' ? body.detail : 'AI search failed')
-      }
-      const data = await res.json()
-      const alive = new Set((tables || []).map((t) => t.table_id))
+      const catalog = catalogRowsForAiSearch(tables, { pdfJob: true })
+      const data = await runPdfJobTableAiSearch(jobId, prompt, catalog)
+      const alive = new Set((tables || []).map((t) => String(t.table_id)))
       const ids = (data.table_ids || []).map(String).filter((id) => alive.has(id))
       const intent = data.intent === 'remove' ? 'remove' : 'find'
-      setAiMatchIds(ids)
-      setAiIntent(intent)
-      setAiRationale(typeof data.rationale === 'string' ? data.rationale : '')
+      const rationale = typeof data.rationale === 'string' ? data.rationale : ''
       setExpanded(null)
       setTablePage(0)
 
+      if (intent === 'find') {
+        if (previewFilterControlled) {
+          onPreviewAiFilterChange(
+            ids.length
+              ? createPreviewAiFindFilter({ tableIds: ids, rationale, prompt })
+              : null,
+          )
+          setAiMatchIds(null)
+          setAiIntent(null)
+          setAiRationale('')
+        } else {
+          setAiMatchIds(ids)
+          setAiIntent('find')
+          setAiRationale(rationale)
+        }
+        if (selectMode === 'delete') {
+          setSelectMode(null)
+          setSelectedIds(new Set())
+        }
+      } else {
+        if (previewFilterControlled) {
+          onPreviewAiFilterChange(null)
+        }
+        setAiMatchIds(ids)
+        setAiIntent('remove')
+        setAiRationale(rationale)
+      }
+
       if (intent === 'remove' && ids.length) {
-        // Select in the existing delete workflow — never auto-delete.
         setSelectMode('delete')
         setSelectedIds(new Set(ids))
       } else if (selectMode === 'delete' && intent !== 'remove') {
@@ -425,7 +476,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
       }
 
       if (!ids.length) {
-        setError(data.rationale || 'No tables matched that AI search.')
+        setError(rationale || data.rationale || 'No tables matched that AI search.')
       }
     } catch (e) {
       setError(e.message || 'AI search failed')
@@ -490,7 +541,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
 
   if (error && !tables) {
     return (
-      <PdfConsoleLayout jobId={jobId} step={2} maxStepReached={3}>
+      <ReviewChrome jobId={jobId} embedded={embedded} step={2} maxStepReached={3}>
         <div className="flex flex-col gap-[18px]">
           <div className="flex flex-col">
             <button
@@ -509,12 +560,12 @@ export default function PdfReview({ jobId, filename, onDone }) {
             <Button variant="primary" className="self-start" onClick={onDone}>Upload PDF again</Button>
           </div>
         </div>
-      </PdfConsoleLayout>
+      </ReviewChrome>
     )
   }
   if (!tables) {
     return (
-      <PdfConsoleLayout jobId={jobId} step={2} maxStepReached={3}>
+      <ReviewChrome jobId={jobId} embedded={embedded} step={2} maxStepReached={3}>
         <div className="flex flex-col gap-[18px]">
           <div className="flex flex-col">
             <div className="font-display text-[26px] font-medium leading-tight text-ink">Review Extracted Tables</div>
@@ -524,7 +575,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
             Loading results…
           </div>
         </div>
-      </PdfConsoleLayout>
+      </ReviewChrome>
     )
   }
 
@@ -545,7 +596,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
       },
     ]
     return (
-      <PdfConsoleLayout jobId={jobId} step={2} maxStepReached={3}>
+      <ReviewChrome jobId={jobId} embedded={embedded} step={2} maxStepReached={3}>
         <div className="mx-auto flex max-w-xl flex-col gap-8 py-8">
           <div>
             <div className="font-display text-xl font-medium text-ink">{filename || 'Preparing grouping'}</div>
@@ -555,7 +606,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
           </div>
           <ProcessingStepper steps={continueSteps} />
         </div>
-      </PdfConsoleLayout>
+      </ReviewChrome>
     )
   }
 
@@ -627,10 +678,23 @@ export default function PdfReview({ jobId, filename, onDone }) {
   // AI "find" filters the list; AI "remove" only selects checkboxes so the
   // full list stays accessible for manual adjustments.
   const searchQuery = tableSearch.trim()
-  if (aiMatchIds && aiIntent === 'find') {
-    const idSet = new Set(aiMatchIds)
-    filteredTables = filteredTables.filter((t) => idSet.has(t.table_id))
-  } else if (!aiMatchIds && searchQuery) {
+  const chatFindActive = previewFilterControlled && isPreviewAiFindActive(previewAiFilter)
+  const findMatchIds = chatFindActive
+    ? previewAiFilter.tableIds
+    : (aiMatchIds && aiIntent === 'find' ? aiMatchIds : null)
+  const displayAiRationale = chatFindActive
+    ? (previewAiFilter.rationale || '')
+    : aiRationale
+  const displayAiFindMode = Boolean(findMatchIds?.length && (chatFindActive || aiIntent === 'find'))
+  const aiSearchUiActive = displayAiFindMode || Boolean(aiMatchIds?.length)
+  const aiResultsCount = displayAiFindMode
+    ? findMatchIds.length
+    : (aiMatchIds?.length ?? 0)
+
+  if (findMatchIds?.length && displayAiFindMode) {
+    const idSet = new Set(findMatchIds.map(String))
+    filteredTables = filteredTables.filter((t) => idSet.has(String(t.table_id)))
+  } else if (!findMatchIds && !aiMatchIds && searchQuery) {
     filteredTables = filteredTables.filter((t) => matchesTableSearch(t, searchQuery))
   }
   // Merge mode: after the first selection, only show tables with the same headers.
@@ -714,17 +778,58 @@ export default function PdfReview({ jobId, filename, onDone }) {
     </div>
   ) : null
 
-  const chipClass = (active) =>
-    `dhara-tab flex h-8 flex-none items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-semibold ${
+  const chatCompact = embedded && compact
+
+  const chipClass = (active) => {
+    const size = chatCompact
+      ? 'h-7 gap-1 rounded-full px-2.5 text-[11px]'
+      : 'h-8 gap-1.5 rounded-full px-3.5 text-[12.5px]'
+    return `dhara-tab flex flex-none items-center font-semibold ${size} ${
       active
         ? 'border-teal-deep bg-teal-deep text-cream'
         : 'border-line bg-white text-ink-soft hover:border-teal/35 hover:bg-sage hover:text-teal-deep'
     }`
+  }
+
+  const toolbarPad = chatCompact ? 'px-3 py-2' : 'px-5 py-3 sm:px-6'
+  const listPad = chatCompact ? 'px-3 py-2' : 'px-5 py-3 sm:px-6 sm:pb-5'
+
+  const bulkActionButtons = !selectMode ? (
+    <div className={`flex flex-none flex-wrap items-center ${chatCompact ? 'gap-1' : 'gap-2'}`}>
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={tables.length < 2}
+        onClick={() => enterSelectMode('merge')}
+        title="Merge tables that share the same column headers"
+      >
+        Merge
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="!border-[#c45c4a] !text-[#c45c4a] hover:!bg-[#fff1ee]"
+        disabled={tables.length === 0}
+        onClick={() => enterSelectMode('delete')}
+      >
+        Delete
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={!tables?.length || downloadingZip}
+        onClick={() => enterSelectMode('download')}
+        title="Select tables to download as a ZIP"
+      >
+        {chatCompact ? 'ZIP' : 'Download'}
+      </Button>
+    </div>
+  ) : null
 
   return (
-    <PdfConsoleLayout jobId={jobId} step={2} maxStepReached={3}>
-    <div ref={rootRef} className="flex flex-col gap-[18px]">
-      <ScrollToTopButton scrollRootRef={rootRef} />
+    <ReviewChrome jobId={jobId} embedded={embedded} step={2} maxStepReached={3}>
+    <div ref={rootRef} className={chatCompact ? 'flex flex-col gap-3' : 'flex flex-col gap-[18px]'}>
+      {!chatCompact && <ScrollToTopButton scrollRootRef={rootRef} />}
       {pendingDeleteIds && (
         <DeleteConfirmDialog
           count={pendingDeleteIds.length}
@@ -741,48 +846,68 @@ export default function PdfReview({ jobId, filename, onDone }) {
           merging={merging}
         />
       )}
+      
 
-      {/* Page header — title / purpose stay above the content panel */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      {/* Page header — compact row in chat panel; full title in guided / standalone review */}
+      <div className={`flex min-w-0 ${chatCompact ? 'w-full items-center justify-between gap-2' : 'flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'}`}>
         <div className="min-w-0">
-          <button
-            type="button"
-            className="mb-3.5 inline-flex items-center gap-1.5 text-[15px] font-semibold text-teal hover:text-teal-dark"
-            onClick={onDone}
-          >
-            <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
-            Upload another file
-          </button>
-          <div className="font-display text-[26px] font-medium leading-tight text-ink">Review Extracted Tables</div>
-          <div className="mt-1.5 text-[13px] font-medium text-ink">
-            {filename || 'PDF report'}
-            {filteredCount > 0 ? (
-              <span className="font-normal text-ink-soft">
-                {' '}· page {currentPage + 1} of {pageCount}
-              </span>
-            ) : null}
+          {!embedded && (
+            <button
+              type="button"
+              className="mb-3.5 inline-flex items-center gap-1.5 text-[15px] font-semibold text-teal hover:text-teal-dark"
+              onClick={onDone}
+            >
+              <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+              Upload another file
+            </button>
+          )}
+          {chatCompact ? (
+            <div className="min-w-0 shrink text-[12px] text-ink-soft">
+              {filteredCount} table{filteredCount === 1 ? '' : 's'}
+              {pageCount > 1 ? ` · page ${currentPage + 1}/${pageCount}` : ''}
+            </div>
+          ) : (
+            <>
+              <div className="font-display text-[26px] font-medium leading-tight text-ink">Review Extracted Tables</div>
+              <div className="mt-1.5 text-[13px] font-medium text-ink">
+                {filename || 'PDF report'}
+                {filteredCount > 0 ? (
+                  <span className="font-normal text-ink-soft">
+                    {' '}· page {currentPage + 1} of {pageCount}
+                  </span>
+                ) : null}
+              </div>
+            </>
+          )}
+        </div>
+        {chatCompact ? bulkActionButtons : (
+          <div className="flex flex-none flex-wrap items-center justify-end gap-2.5">
+            <KydsSummaryCard variant="corner" />
           </div>
-        </div>
-        <div className="flex flex-none flex-wrap items-center justify-end gap-2.5">
-          <KydsSummaryCard variant="corner" />
-        </div>
+        )}
       </div>
 
       {error && <ErrorBanner>{error}</ErrorBanner>}
 
-      {/* Content box: filters stick at the top of the scrollport while tables scroll underneath. */}
-      <div className="rounded-xl border border-line bg-white shadow-sm">
-        <div className="sticky top-0 z-20 space-y-2 rounded-t-xl border-b border-line bg-white px-5 py-3 sm:px-6">
-          <div className="space-y-1">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+      {/* Content box: filters stick at the top of the scrollport in full-page review; scroll with content when embedded (chat). */}
+      <div className={chatCompact ? 'bg-white' : 'rounded-xl border border-line bg-white shadow-sm'}>
+        <div
+          className={`space-y-2 bg-white ${toolbarPad} ${
+            embedded ? 'border-b border-line/70' : 'sticky top-0 z-20 rounded-t-xl border-b border-line'
+          }`}
+        >
+          <div className={chatCompact ? 'space-y-1.5' : 'space-y-1'}>
+            <div className={`flex gap-2 ${chatCompact ? 'flex-col' : 'flex-col sm:flex-row sm:items-stretch'}`}>
               <label
-                className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-2 focus-within:border-teal focus-within:shadow-focus-ring ${
-                  aiMatchIds
+                className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg border focus-within:border-teal focus-within:shadow-focus-ring ${
+                  chatCompact ? 'px-2 py-1.5' : 'px-2.5 py-2'
+                } ${
+                  aiSearchUiActive
                     ? 'border-teal/50 bg-sage/40'
                     : 'border-line bg-cream'
                 }`}
               >
-                {aiMatchIds ? (
+                {aiSearchUiActive ? (
                   <Sparkles className="h-4 w-4 flex-none text-teal" strokeWidth={2} aria-hidden />
                 ) : (
                   <Search className="h-4 w-4 flex-none text-ink-soft" strokeWidth={2} aria-hidden />
@@ -792,7 +917,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
                   value={tableSearch}
                   onChange={(e) => {
                     setTableSearch(e.target.value)
-                    if (aiMatchIds) clearAiSearch({ keepSelectMode: true })
+                    if (aiSearchUiActive) clearAiSearch({ keepSelectMode: true })
                     setExpanded(null)
                     setTablePage(0)
                   }}
@@ -802,14 +927,14 @@ export default function PdfReview({ jobId, filename, onDone }) {
                       runAiSearch()
                     }
                   }}
-                  placeholder={aiMatchIds ? 'AI search active — edit to return to regular search' : 'Search by table name or page…'}
-                  className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-[13.5px] text-ink shadow-none outline-none placeholder:text-ink-soft focus:outline-none focus:ring-0"
+                  placeholder={displayAiFindMode ? 'AI search active…' : (chatCompact ? 'Search tables…' : 'Search by table name or page…')}
+                  className={`min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-ink shadow-none outline-none placeholder:text-ink-soft focus:outline-none focus:ring-0 ${chatCompact ? 'text-[13px]' : 'text-[13.5px]'}`}
                   aria-label="Search tables by name or page number"
                   autoComplete="off"
                   spellCheck={false}
                   disabled={aiSearching}
                 />
-                {(tableSearch || aiMatchIds) ? (
+                {(tableSearch || aiSearchUiActive) ? (
                   <button
                     type="button"
                     className="flex-none text-ink-soft hover:text-teal"
@@ -827,7 +952,8 @@ export default function PdfReview({ jobId, filename, onDone }) {
               </label>
               <Button
                 variant="secondary"
-                className="sm:flex-none"
+                size={chatCompact ? 'sm' : undefined}
+                className={chatCompact ? 'w-full sm:w-auto' : 'sm:flex-none'}
                 disabled={aiSearching || !tableSearch.trim() || !tables?.length}
                 onClick={runAiSearch}
                 title="Interpret this as a natural-language search (⌘/Ctrl+Enter)"
@@ -835,25 +961,25 @@ export default function PdfReview({ jobId, filename, onDone }) {
                 {aiSearching ? (
                   <span className="inline-flex items-center gap-1.5">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} aria-hidden />
-                    Searching…
+                    {chatCompact ? '…' : 'Searching…'}
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1.5">
                     <Sparkles className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
-                    Search with AI
+                    {chatCompact ? 'AI search' : 'Search with AI'}
                   </span>
                 )}
               </Button>
             </div>
-            {aiMatchIds ? (
+            {aiSearchUiActive ? (
               <div className="flex flex-wrap items-center gap-2 px-0.5">
                 <span className="inline-flex items-center gap-1 rounded-full border border-teal/30 bg-sage px-2 py-0.5 text-[11.5px] font-semibold text-teal-deep">
                   <Sparkles className="h-3 w-3" strokeWidth={2} aria-hidden />
-                  AI {aiIntent === 'remove' ? 'remove selection' : 'results'}
-                  <span className="tabular-nums">· {aiMatchIds.length}</span>
+                  AI {aiIntent === 'remove' && !displayAiFindMode ? 'remove selection' : 'results'}
+                  <span className="tabular-nums">· {aiResultsCount}</span>
                 </span>
-                {aiRationale ? (
-                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-soft">{aiRationale}</span>
+                {displayAiRationale ? (
+                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-soft">{displayAiRationale}</span>
                 ) : null}
                 <button
                   type="button"
@@ -863,18 +989,20 @@ export default function PdfReview({ jobId, filename, onDone }) {
                   Regular search
                 </button>
               </div>
-            ) : (
+            ) : !chatCompact ? (
               <p className="m-0 px-0.5 text-[11.5px] leading-snug text-ink-soft">
                 Tip: jump to a page with <span className="font-medium text-ink">15</span>, <span className="font-medium text-ink">p15</span>, or <span className="font-medium text-ink">page 15</span>
                 {' '}· or use <span className="font-medium text-ink">Search with AI</span> for natural language
               </p>
-            )}
+            ) : null}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="flex-none text-[13px] font-bold tracking-wide text-ink">
-              Filter by:
-            </span>
-            <div className="flex min-w-0 flex-1 flex-wrap gap-2" role="tablist" aria-label="Filter tables by review status">
+          <div className={`flex flex-wrap items-center ${chatCompact ? 'gap-1.5' : 'gap-2'}`}>
+            {!chatCompact && (
+              <span className="flex-none text-[13px] font-bold tracking-wide text-ink">
+                Filter by:
+              </span>
+            )}
+            <div className="flex min-w-0 flex-1 flex-wrap gap-1.5" role="tablist" aria-label="Filter tables by review status">
               {primaryFilterOptions.map(({ id, label }) => (
                 <button
                   key={id}
@@ -899,40 +1027,12 @@ export default function PdfReview({ jobId, filename, onDone }) {
                 </button>
               ))}
             </div>
-            {!selectMode ? (
-              <div className="ml-auto flex flex-none items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={tables.length < 2}
-                  onClick={() => enterSelectMode('merge')}
-                  title="Merge tables that share the same column headers"
-                >
-                  Merge
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="!border-[#c45c4a] !text-[#c45c4a] hover:!bg-[#fff1ee]"
-                  disabled={tables.length === 0}
-                  onClick={() => enterSelectMode('delete')}
-                >
-                  Delete
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={!tables?.length || downloadingZip}
-                  onClick={() => enterSelectMode('download')}
-                  title="Select tables to download as a ZIP"
-                >
-                  Download
-                </Button>
-              </div>
+            {!chatCompact && bulkActionButtons ? (
+              <div className="ml-auto">{bulkActionButtons}</div>
             ) : null}
           </div>
 
-          {sourceFilterOptions.length > 2 && (
+          {!chatCompact && sourceFilterOptions.length > 2 && (
             <div className="flex flex-wrap items-center gap-2 border-t border-line/70 pt-2">
               <span className="flex-none text-[12px] font-semibold tracking-wide text-ink-soft">Source:</span>
               {sourceFilterOptions.map(({ id, label }) => (
@@ -1059,14 +1159,14 @@ export default function PdfReview({ jobId, filename, onDone }) {
             </div>
           )}
 
-          {tablesPaginationBar ? (
+          {!chatCompact && tablesPaginationBar ? (
             <div className="border-t border-line pt-2">
               {tablesPaginationBar}
             </div>
           ) : null}
         </div>
 
-        <div className="flex flex-col gap-2 px-5 py-3 sm:px-6 sm:pb-5">
+        <div className={`flex flex-col gap-2 ${listPad}`}>
           {filteredCount === 0 ? (
             <div className="rounded-lg border border-dashed border-line px-2 py-10 text-center text-[13px] text-ink-soft">
               {selectMode === 'merge' && selectedIds.size > 0
@@ -1081,7 +1181,7 @@ export default function PdfReview({ jobId, filename, onDone }) {
             const selected = selectedIds.has(t.table_id)
             return (
               <div key={t.table_id} className={`overflow-hidden rounded-lg border bg-surface transition-[border-color] duration-300 ease-out ${isOpen ? 'border-teal' : selectMode && selected ? 'border-teal/50' : 'border-line'}`}>
-                <div className="flex items-start gap-2.5 px-3.5 py-2.5 hover:bg-cream">
+                <div className={`flex items-start gap-2 hover:bg-cream ${chatCompact ? 'px-2.5 py-2' : 'gap-2.5 px-3.5 py-2.5'}`}>
                   {selectMode && (
                     <input
                       type="checkbox"
@@ -1173,17 +1273,21 @@ export default function PdfReview({ jobId, filename, onDone }) {
         </div>
       </div>
 
-      <div className="flex items-center justify-end gap-4">
-        <Button variant="primary" disabled={continuing} onClick={continueToGrouping} className="inline-flex items-center gap-1.5">
-          {continuing ? 'Saving…' : (
-            <>
-              Continue
-              <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
-            </>
-          )}
-        </Button>
-      </div>
+      {!chatCompact && (
+        <div className="flex items-center justify-end gap-4">
+          <Button variant="primary" disabled={continuing} onClick={continueToGrouping} className="inline-flex items-center gap-1.5">
+            {continuing ? 'Saving…' : (
+              <>
+                Continue
+                <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+              </>
+            )}
+          </Button>
+        </div>
+      )}
     </div>
-    </PdfConsoleLayout>
+    </ReviewChrome>
   )
-}
+})
+
+export default PdfReview

@@ -57,6 +57,10 @@ export function clearAllPdfPipelineState() {
 export function clearConsoleSession() {
   try {
     sessionStorage.removeItem('dhara_console_state_v1')
+    sessionStorage.removeItem('dhara_chat_messages_v1')
+    sessionStorage.removeItem('dhara_chat_active_job_v1')
+    sessionStorage.removeItem('dhara_chat_review_job_v1')
+    sessionStorage.removeItem('dhara_chat_review_filename_v1')
   } catch {
     // best-effort
   }

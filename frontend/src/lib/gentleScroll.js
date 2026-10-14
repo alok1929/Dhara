@@ -94,3 +94,23 @@ export function attachGentleWheel(el, factor = SCROLL_WHEEL_FACTOR) {
   el.addEventListener('wheel', onWheel, { passive: false })
   return () => el.removeEventListener('wheel', onWheel)
 }
+
+/** Scroll a stage anchor into view inside its nearest scrollport (or window). */
+export function gentleScrollTo(el, { offset = 72 } = {}) {
+  if (!el || typeof window === 'undefined') return
+  let parent = el.parentElement
+  while (parent) {
+    const { overflowY } = getComputedStyle(parent)
+    if (
+      (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay')
+      && parent.scrollHeight > parent.clientHeight + 1
+    ) {
+      const top = el.offsetTop - offset
+      animateScrollTo(parent, Math.max(0, top))
+      return
+    }
+    parent = parent.parentElement
+  }
+  const top = el.getBoundingClientRect().top + window.scrollY - offset
+  animateScrollTo(window, Math.max(0, top))
+}

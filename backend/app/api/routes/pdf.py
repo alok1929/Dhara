@@ -318,6 +318,73 @@ async def pdf_ai_search_tables(
     return result
 
 
+@router.post("/api/pdf/jobs/{job_id}/tables/ai-chat")
+async def pdf_ai_chat_tables(
+    job_id: str,
+    request: Request,
+    user_email: str = Depends(require_user_email),
+    db: Session = Depends(get_db),
+):
+    """Natural-language Q&A over extracted PDF job tables (chat preview)."""
+    from app.services.extraction.pdf.preview_chat import preview_chat_from_prompt
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    prompt = str(body.get("prompt") or body.get("query") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "prompt is required")
+
+    api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
+    if not (api_key or "").strip():
+        raise HTTPException(400, "Save an LLM API key in Settings before using chat")
+
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        if not job or job.get("user_email") != user_email:
+            raise HTTPException(404, "Job not found")
+        if not job_extraction_complete(job["status"]):
+            raise HTTPException(409, f"Job not finished yet (status={job['status']})")
+        tables = _pdf_tables_from_job(job)
+
+    client_tables = body.get("tables")
+    if isinstance(client_tables, list) and client_tables:
+        by_id = {
+            str(t.get("table_id")): t
+            for t in client_tables
+            if isinstance(t, dict) and t.get("table_id")
+        }
+        for t in tables:
+            override = by_id.get(str(t.get("table_id") or ""))
+            if not override:
+                continue
+            for key in ("title", "banner_table_id", "short_description", "description", "summary"):
+                if key in override:
+                    t[key] = override.get(key)
+
+    conversation = body.get("conversation")
+    if not isinstance(conversation, list):
+        conversation = None
+
+    try:
+        result = await asyncio.to_thread(
+            preview_chat_from_prompt,
+            prompt=prompt,
+            tables=tables,
+            api_key=api_key,
+            conversation=conversation,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, f"Could not run chat: {e}") from e
+    return result
+
+
 @router.post("/api/pdf/jobs/{job_id}/tables/merge")
 async def pdf_merge_tables(job_id: str, request: Request, user_email: str = Depends(require_user_email)):
     """

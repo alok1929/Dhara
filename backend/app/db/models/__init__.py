@@ -1,5 +1,6 @@
 """ORM model package — import all models for Alembic metadata."""
 from app.db.models.catalogue import Dataset, DatasetRow, KydsEntry, LlmApiKey, MetadataGroup
+from app.db.models.console_chat import ConsoleChatSession
 from app.db.models.organisation import Organisation, OrganisationMembership
 from app.db.models.pdf import (
     PdfJob,
@@ -37,4 +38,5 @@ __all__ = [
     "PdfTableSnapshot",
     "ExtractStaging",
     "SemanticEmbedding",
+    "ConsoleChatSession",
 ]

@@ -19,6 +19,20 @@ import { subscribeConsoleTableEdits } from '../../lib/consoleTableEdit'
 import { stepInfoFor } from './ConsoleUploadChoice'
 import { withinStageBack } from './ConsoleStages'
 import { isDatasetFile, uploadDatasetBatch, useSinglePdfUpload } from '../../lib/datasetUpload'
+import { filesUseInlineExcelMatch, runBatchExtractMatch } from '../../lib/batchExtractMatch'
+import {
+  createConsoleChatSession,
+  linkConsoleChatSession,
+} from '../../lib/consoleChatSession'
+import {
+  loadChatReviewFilename,
+  loadChatReviewJob,
+  saveChatReviewJob,
+} from '../../lib/chatPersist'
+import {
+  continuePdfJobFromPreview,
+  matchResultFromPdfPersistResponse,
+} from '../../lib/chatConsoleHelpers'
 
 export function useConsolePipeline() {
   const persisted = loadPersistedConsoleState()
@@ -97,6 +111,19 @@ export function useConsolePipeline() {
   // going back; comparing against plain `step` disabled it as soon as it
   // dropped, blocking the way forward again.
   const [maxStepReached, setMaxStepReached] = useState(persisted?.maxStepReached ?? 0)
+  const [chatSessionId, setChatSessionId] = useState(persisted?.chatSessionId ?? null)
+  const [pdfReviewJobId, setPdfReviewJobId] = useState(
+    () => persisted?.pdfReviewJobId ?? loadChatReviewJob() ?? null,
+  )
+  const [pdfReviewFilename, setPdfReviewFilename] = useState(
+    () => persisted?.pdfReviewFilename ?? loadChatReviewFilename() ?? null,
+  )
+
+  const setPdfReviewJob = (jobId, filename = null) => {
+    setPdfReviewJobId(jobId || null)
+    setPdfReviewFilename(filename || null)
+    saveChatReviewJob(jobId || null, filename || null)
+  }
   useEffect(() => {
     setMaxStepReached((m) => Math.max(m, step))
   }, [step])
@@ -123,13 +150,16 @@ export function useConsolePipeline() {
       metadataStarted,
       maxStepReached,
       autoMatchResult: autoMatchResultRef.current,
+      chatSessionId,
+      pdfReviewJobId,
+      pdfReviewFilename,
     }
     try {
       sessionStorage.setItem(CONSOLE_STORAGE_KEY, JSON.stringify(toSave))
     } catch {
       // best-effort — e.g. storage full or unavailable
     }
-  }, [step, uploadChoice, matchResult, batchPreviewId, selectedDataset, metaLabel, metadataId, metadataIds, pendingGroups, savedIds, metadataStarted, maxStepReached])
+  }, [step, uploadChoice, matchResult, batchPreviewId, selectedDataset, metaLabel, metadataId, metadataIds, pendingGroups, savedIds, metadataStarted, maxStepReached, chatSessionId, pdfReviewJobId, pdfReviewFilename])
 
   // Flush before the page is hidden (sidebar nav / refresh) so the latest
   // step is always what comes back — don't rely only on the effect above.
@@ -153,6 +183,9 @@ export function useConsolePipeline() {
           metadataStarted,
           maxStepReached,
           autoMatchResult: autoMatchResultRef.current,
+          chatSessionId,
+          pdfReviewJobId,
+          pdfReviewFilename,
         }))
       } catch {
         // best-effort
@@ -168,7 +201,46 @@ export function useConsolePipeline() {
       window.removeEventListener('pagehide', flush)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [step, uploadChoice, matchResult, batchPreviewId, selectedDataset, metaLabel, metadataId, metadataIds, pendingGroups, savedIds, metadataStarted, maxStepReached])
+  }, [step, uploadChoice, matchResult, batchPreviewId, selectedDataset, metaLabel, metadataId, metadataIds, pendingGroups, savedIds, metadataStarted, maxStepReached, chatSessionId, pdfReviewJobId, pdfReviewFilename])
+
+  /** Align step / progress when leaving chat for guided (or restoring preview). */
+  const syncGuidedPreviewStep = () => {
+    const inGroups = (matchResult?.groups || []).reduce(
+      (n, g) => n + (g.matched_tables?.length || 0),
+      0,
+    )
+    const hasBatchPreview = inGroups + (matchResult?.unmatched_tables?.length || 0) > 0
+    if (pdfReviewJobId || hasBatchPreview) {
+      setMaxStepReached((m) => Math.max(m, 2))
+      if (step < 2) setStep(2)
+    }
+  }
+
+  const continueFromPdfPreview = async (jobId, persistResponse) => {
+    const id = jobId || pdfReviewJobId
+    if (!id) return
+    const nextMatch = persistResponse?.grouping
+      ? matchResultFromPdfPersistResponse(persistResponse, id, pdfReviewFilename || 'pdf')
+      : await continuePdfJobFromPreview(id, { sourceFile: pdfReviewFilename || 'pdf' })
+    if (!nextMatch) {
+      throw new Error('Could not load grouping after preview')
+    }
+    setMatchResult(nextMatch)
+    setPdfReviewJob(null, null)
+    setMaxStepReached((m) => Math.max(m, 3))
+    setStep(3)
+  }
+
+  const beginNewConsoleChatSession = async ({ batchId, pdfJobId } = {}) => {
+    const data = await createConsoleChatSession({ batchId, pdfJobId })
+    setChatSessionId(data.session_id)
+    return data.session_id
+  }
+
+  const linkConsoleChatSessionId = async (patch) => {
+    if (!chatSessionId) return null
+    return linkConsoleChatSession(chatSessionId, patch)
+  }
 
   const revertToAutomaticBatchGrouping = () => {
     if (!autoMatchResultRef.current) return
@@ -435,48 +507,73 @@ export function useConsolePipeline() {
     setPendingDatasetFiles([])
   }
 
-  const handlePdfFile = async (file) => {
-    if (!file) return
+  const uploadPdfJob = async (file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append(
+      'dataset_id_config',
+      JSON.stringify(
+        (await import('../../lib/settingsConfig')).datasetIdConfigPayload(),
+      ),
+    )
+    const res = await fetch('/api/pdf/upload', withAuthHeaders(withLlmKeyHeaders({ method: 'POST', body: fd })))
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Upload failed' }))
+      throw new Error(err.detail || 'Upload failed')
+    }
+    const { job_id } = await res.json()
+    return job_id
+  }
+
+  const handlePdfFile = async (file, { navigate = true } = {}) => {
+    if (!file) return null
     setPdfError('')
     setPdfUploading(true)
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append(
-        'dataset_id_config',
-        JSON.stringify(
-          (await import('../../lib/settingsConfig')).datasetIdConfigPayload(),
-        ),
-      )
-      const res = await fetch('/api/pdf/upload', withAuthHeaders(withLlmKeyHeaders({ method: 'POST', body: fd })))
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Upload failed' }))
-        throw new Error(err.detail || 'Upload failed')
-      }
-      const { job_id } = await res.json()
-      router.push(`/console/processing/${job_id}`)
+      const jobId = await uploadPdfJob(file)
+      setPdfUploading(false)
+      if (navigate) router.push(`/console/processing/${jobId}`)
+      return jobId
     } catch (e) {
       setPdfError(e.message)
       setPdfUploading(false)
+      return null
     }
   }
 
-  const startDatasetProcessing = async () => {
+  /**
+   * @returns {{ kind: 'matched'|'job'|'navigated'|'error', jobId?: string, message?: string }|null}
+   */
+  const startDatasetProcessing = async ({ navigate = true } = {}) => {
     const files = pendingDatasetFiles
-    if (!files.length) return
+    if (!files.length) return null
     setPdfError('')
     setPdfUploading(true)
     try {
-      if (useSinglePdfUpload(files)) {
-        await handlePdfFile(files[0])
-        return
+      if (filesUseInlineExcelMatch(files)) {
+        const data = await runBatchExtractMatch(files, step1MetadataFiles)
+        setPdfUploading(false)
+        handleMatched(data)
+        return { kind: 'matched' }
       }
-      const data = await uploadDatasetBatch(files)
-      const jobId = data.job_id || data.batch_id
-      router.push(`/console/processing/${jobId}`)
+
+      let jobId
+      if (useSinglePdfUpload(files)) {
+        jobId = await uploadPdfJob(files[0])
+      } else {
+        const data = await uploadDatasetBatch(files)
+        jobId = data.job_id || data.batch_id
+      }
+      setPdfUploading(false)
+      if (navigate) {
+        router.push(`/console/processing/${jobId}`)
+        return { kind: 'navigated', jobId }
+      }
+      return { kind: 'job', jobId }
     } catch (e) {
       setPdfError(e.message || 'Upload failed')
       setPdfUploading(false)
+      return { kind: 'error', message: e.message }
     }
   }
 
@@ -641,5 +738,14 @@ export function useConsolePipeline() {
     unsavedMismatched,
     uploadChoice,
     visiblePreviewTables,
+    chatSessionId,
+    setChatSessionId,
+    beginNewConsoleChatSession,
+    linkConsoleChatSessionId,
+    pdfReviewJobId,
+    pdfReviewFilename,
+    setPdfReviewJob,
+    syncGuidedPreviewStep,
+    continueFromPdfPreview,
   }
 }
