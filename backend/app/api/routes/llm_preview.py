@@ -30,6 +30,7 @@ from app.services.preview import (
     require_finished_job,
     review_tables_for_job,
     set_llm_preview_catalog,
+    soft_delete_tables,
 )
 from app.workers.extraction_jobs import (
     _get_pdf_job,
@@ -167,6 +168,8 @@ async def _handle_llm_input(
     - persist_reviews (optional bool) — write overlay into job.reviews for guided handoff
     - refresh (optional bool) — rebuild catalog from current tables (stubs, no LLM)
     - force_summarize (optional bool) — with refresh, rewrite catalog via LangChain
+    - confirm_delete (optional bool) — for delete/bulk_delete, soft-delete via the same
+      ``deleted_table_ids`` path as guided Preview (POST /pdf/.../tables/delete)
     """
     try:
         body = await request.json()
@@ -184,6 +187,7 @@ async def _handle_llm_input(
     persist_reviews = bool(body.get("persist_reviews"))
     refresh = bool(body.get("refresh"))
     force_summarize = bool(body.get("force_summarize"))
+    confirm_delete = bool(body.get("confirm_delete"))
     client_tables = body.get("tables")
 
     api_key = _require_api_key(request, user, db)
@@ -254,6 +258,21 @@ async def _handle_llm_input(
 
     result = execute_action_plan(plan, live_tables)
 
+    action_type = str(result.get("type") or "")
+    if confirm_delete and action_type in ("delete", "bulk_delete"):
+        to_delete = list(result.get("table_ids") or [])
+        if to_delete:
+            with _pdf_jobs_lock:
+                job = _get_pdf_job(job_id)
+                if not job_visible_to(job, user):
+                    raise HTTPException(404, "Job not found")
+                soft_delete_tables(job, to_delete, save=_save_pdf_job)
+            result["executed"] = True
+            result["deleted"] = to_delete
+            result.pop("message", None)
+        else:
+            result["executed"] = False
+
     with _pdf_jobs_lock:
         job = _get_pdf_job(job_id)
         if job_visible_to(job, user):
@@ -264,6 +283,7 @@ async def _handle_llm_input(
                     "type": result.get("type"),
                     "table_ids": result.get("table_ids") or [],
                     "rationale": result.get("rationale") or "",
+                    "executed": result.get("executed"),
                 },
             )
             _save_pdf_job(job)

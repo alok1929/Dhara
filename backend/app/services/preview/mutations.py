@@ -28,6 +28,10 @@ def soft_delete_tables(
         reviews.pop(tid, None)
     job["reviews"] = reviews
 
+    from app.services.preview.catalog_store import prune_llm_preview_catalog
+
+    prune_llm_preview_catalog(job, ids)
+
     if save is not None:
         save(job)
 

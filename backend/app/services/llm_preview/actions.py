@@ -117,7 +117,10 @@ def execute_action_plan(
 
     message: Optional[str] = None
     if action in (LlmActionType.delete, LlmActionType.bulk_delete) and selected:
-        message = "Confirm delete via POST /api/pdf/jobs/{job_id}/tables/delete"
+        message = (
+            "Confirm delete via POST /api/pdf/jobs/{job_id}/tables/delete "
+            "or llm_input with confirm_delete=true"
+        )
 
     out: Dict[str, Any] = {
         "type": action.value if isinstance(action, LlmActionType) else str(action),

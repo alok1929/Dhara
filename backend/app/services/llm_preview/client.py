@@ -23,6 +23,7 @@ def post_llm_input(
     persist_reviews: bool = False,
     refresh: bool = False,
     force_summarize: bool = False,
+    confirm_delete: bool = False,
     timeout: float = 300,
 ) -> Dict[str, Any]:
     """
@@ -41,6 +42,8 @@ def post_llm_input(
         body["refresh"] = True
     if force_summarize:
         body["force_summarize"] = True
+    if confirm_delete:
+        body["confirm_delete"] = True
 
     hdrs = dict(headers or {})
     hdrs.setdefault("Content-Type", "application/json")
