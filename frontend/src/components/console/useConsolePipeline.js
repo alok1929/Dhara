@@ -392,10 +392,20 @@ export function useConsolePipeline() {
     patchTablesRef.current({ [uid]: edits })
   }), [])
 
-  const applyReconcile = (corrections) => {
+  /**
+   * Apply preview ID/title corrections and advance to grouping.
+   * @param {object} corrections
+   * @param {{ skipStatusPage?: boolean }} [opts] — chat mode runs its own inline task UI
+   */
+  const applyReconcile = (corrections, { skipStatusPage = false } = {}) => {
     patchTables(corrections)
     setManualGrouping(false)
     setEditingGroups(false)
+    if (skipStatusPage) {
+      setMaxStepReached((m) => Math.max(m, 3))
+      setStep(3)
+      return
+    }
     setStatusPage({
       ...STATUS_TRANSITIONS.previewToGrouping,
       key: 'previewToGrouping',

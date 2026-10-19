@@ -18,6 +18,10 @@ import KydsSummaryCard from '../KydsSummaryCard'
 import PdfConsoleLayout from './PdfConsoleLayout'
 import ProcessingStepper from '../console/ProcessingStepper'
 import {
+  buildPdfGroupingProgressSteps,
+  PDF_GROUPING_PROGRESS_SUBTITLE,
+} from '../../lib/pdfPreviewGroupingProgress'
+import {
   PRIMARY_FILTERS,
   REASON_FILTER_IDS,
   REASON_LABELS,
@@ -130,6 +134,11 @@ const PdfReview = forwardRef(function PdfReview({
   previewAiFilter = null,
   onPreviewAiFilterChange = null,
   onContinueToGrouping = null,
+  /** When true with embedded+onContinueToGrouping, skip local continuing chrome (chat owns progress). */
+  deferContinueProgress = false,
+  /** Fired at the start of continue when deferContinueProgress (so chat can show a task immediately). */
+  onContinueProgressStart = null,
+  onContinueProgressError = null,
 }, ref) {
   const [tables, setTables] = useState(null)
   const [error, setError] = useState('')
@@ -230,11 +239,18 @@ const PdfReview = forwardRef(function PdfReview({
   }
 
   const continueToGrouping = useCallback(async () => {
-    setContinuing(true)
-    setContinuePhase('persist')
+    const showLocalProgress = !(embedded && onContinueToGrouping && deferContinueProgress)
+    if (showLocalProgress) {
+      setContinuing(true)
+      setContinuePhase('persist')
+    } else {
+      onContinueProgressStart?.(jobId)
+    }
     setError('')
     // Advance the stepper while the single persist+propose request runs.
-    const phaseTimer = setTimeout(() => setContinuePhase('group'), 900)
+    const phaseTimer = showLocalProgress
+      ? setTimeout(() => setContinuePhase('group'), 900)
+      : null
     try {
       // Drop stale grouping UI from a previous Continue so the new propose wins.
       try {
@@ -266,8 +282,8 @@ const PdfReview = forwardRef(function PdfReview({
       if (!res.ok) {
         throw new Error(typeof persistData.detail === 'string' ? persistData.detail : 'Could not save tables for grouping')
       }
-      clearTimeout(phaseTimer)
-      setContinuePhase('group')
+      if (phaseTimer) clearTimeout(phaseTimer)
+      if (showLocalProgress) setContinuePhase('group')
       if (embedded && onContinueToGrouping) {
         await onContinueToGrouping(jobId, persistData)
         setContinuing(false)
@@ -276,14 +292,30 @@ const PdfReview = forwardRef(function PdfReview({
         router.push(`/console/grouping/${jobId}`)
       }
     } catch (e) {
-      clearTimeout(phaseTimer)
-      setError(e.message || 'Could not continue to grouping')
+      if (phaseTimer) clearTimeout(phaseTimer)
+      const message = e.message || 'Could not continue to grouping'
+      if (!showLocalProgress) {
+        onContinueProgressError?.(message)
+      } else {
+        setError(message)
+      }
       setContinuing(false)
       setContinuePhase('persist')
     }
-  }, [embedded, jobId, onContinueToGrouping, router, tables])
+  }, [deferContinueProgress, embedded, jobId, onContinueProgressError, onContinueProgressStart, onContinueToGrouping, router, tables])
 
-  useImperativeHandle(ref, () => ({ continueToGrouping }), [continueToGrouping])
+  const getTablesForPersist = useCallback(() => (tables || []).map((t) => ({
+    table_id: t.table_id,
+    title: t.title ?? null,
+    rows: t.rows,
+    columns: t.columns,
+    classification: t.classification,
+    human_review_needed: t.human_review_needed,
+    human_review_reason: t.human_review_reason,
+    semantic_status: t.semantic_status,
+  })), [tables])
+
+  useImperativeHandle(ref, () => ({ continueToGrouping, getTablesForPersist }), [continueToGrouping, getTablesForPersist])
 
   useEffect(() => {
     let cancelled = false
@@ -580,28 +612,14 @@ const PdfReview = forwardRef(function PdfReview({
   }
 
   if (continuing) {
-    const persistDone = continuePhase === 'group'
-    const continueSteps = [
-      {
-        key: 'persist',
-        label: 'Saving approved tables',
-        status: persistDone ? 'done' : 'active',
-        message: persistDone ? undefined : 'Writing reviewed tables so grouping can use them…',
-      },
-      {
-        key: 'group',
-        label: 'Grouping similar tables',
-        status: persistDone ? 'active' : 'pending',
-        message: persistDone ? 'Building embeddings and proposing groups…' : undefined,
-      },
-    ]
+    const continueSteps = buildPdfGroupingProgressSteps(continuePhase)
     return (
       <ReviewChrome jobId={jobId} embedded={embedded} step={2} maxStepReached={3}>
         <div className="mx-auto flex max-w-xl flex-col gap-8 py-8">
           <div>
             <div className="font-display text-xl font-medium text-ink">{filename || 'Preparing grouping'}</div>
             <div className="mt-1 text-sm text-ink-soft">
-              Saving your tables and running grouping — this may take a moment.
+              {PDF_GROUPING_PROGRESS_SUBTITLE}
             </div>
           </div>
           <ProcessingStepper steps={continueSteps} />

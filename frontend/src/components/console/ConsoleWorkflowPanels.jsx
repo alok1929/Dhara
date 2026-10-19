@@ -154,7 +154,7 @@ export default function ConsoleWorkflowPanels({
           </div>
         )}
 
-        {(step === 2 || (inWorkspace && forcePreview)) && previewTables.length > 0 && (
+        {(step === 2 || (inWorkspace && forcePreview)) && previewTables.length > 0 && !matchResult?.pdf_job_id && (
           <div className="flex flex-col gap-6">
             {previewDatasets.length > 1 && (
               <div className="flex flex-wrap items-center gap-2.5">
@@ -346,6 +346,9 @@ export default function ConsoleWorkflowPanels({
             metadataFilling={metadataFilling}
             toast={groupingToast}
             onDismissToast={() => setGroupingToast(null)}
+            preferTableId={Boolean(matchResult.pdf_job_id)}
+            idColumnLabel={matchResult.pdf_job_id ? 'Dataset ID' : undefined}
+            titleColumnLabel={matchResult.pdf_job_id ? 'Title' : undefined}
           />
         )}
 

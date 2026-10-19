@@ -16,6 +16,36 @@ const PREVIEW_ROWS = 5
 const DATASET_ID_INFO = 'The Dataset ID is generated and is used for grouping and table identification.'
 const TABLE_TITLE_INFO = 'The table title is extracted from the table and can be configured manually.'
 
+function columnLeafName(col, index = 0) {
+  if (col == null) return `Column ${index + 1}`
+  if (typeof col === 'string') return col
+  const name = String(col.name || '').trim()
+  if (name) return name
+  const path = columnHeaderPath(col)
+  return path.slice(-1)[0] || `Column ${index + 1}`
+}
+
+function rowCellValue(row, colDef, colName, colIndex) {
+  if (row == null) return undefined
+  if (Array.isArray(row)) return row[colIndex]
+  if (typeof row === 'object') {
+    if (colName != null && Object.prototype.hasOwnProperty.call(row, colName)) return row[colName]
+    if (colDef && typeof colDef === 'object' && colDef.name && colDef.name in row) return row[colDef.name]
+  }
+  return undefined
+}
+
+/** Excel tables use columns: string[]; PDF tables use columns: object[] and rows: list[list]. */
+function prepareViewerTable(table) {
+  const columnDefs = table?.columns || []
+  const columnNames = columnDefs.map((c, i) => columnLeafName(c, i))
+  const pdfStyle = columnDefs.length > 0 && typeof columnDefs[0] === 'object'
+  const headerCols = pdfStyle
+    ? columnDefs
+    : headerColumnsFromRawRows(table?.raw_header_rows, columnNames)
+  return { columnDefs, columnNames, headerCols, pdfStyle }
+}
+
 function InfoTip({ text, placement = 'top' }) {
   const side = placement === 'right'
   const below = placement === 'bottom'
@@ -45,21 +75,20 @@ const TH_BASE =
 const MODAL_TH =
   'border border-[#c4b9a3] bg-[#F4EFE3] px-2 py-1.5 font-sans text-[11px] font-medium leading-tight tracking-wide text-[#5c6166]'
 
-function ExcelTableHead({ columns, rawHeaderRows }) {
-  const headerCols = headerColumnsFromRawRows(rawHeaderRows, columns)
+function ExcelTableHead({ headerCols, columnNames }) {
   const { depth, rows } = buildMultiLevelHeaderRows(headerCols)
 
   if (depth <= 1) {
     return (
       <thead>
         <tr>
-          {columns.map((col) => (
+          {columnNames.map((name) => (
             <th
-              key={col}
-              title={col}
+              key={name}
+              title={name}
               className={`sticky top-0 z-[2] max-w-[220px] overflow-hidden text-ellipsis whitespace-nowrap text-left ${TH_BASE}`}
             >
-              {col}
+              {name}
             </th>
           ))}
         </tr>
@@ -98,8 +127,7 @@ function ExcelTableHead({ columns, rawHeaderRows }) {
 }
 
 /** Modal table head — sticky while scrolling; compact, even columns. */
-function ModalExcelTableHead({ columns, rawHeaderRows }) {
-  const headerCols = headerColumnsFromRawRows(rawHeaderRows, columns)
+function ModalExcelTableHead({ headerCols, columnNames }) {
   const { depth, rows } = buildMultiLevelHeaderRows(headerCols)
   const rowRefs = useRef([])
   const [stickyTops, setStickyTops] = useState(() => Array.from({ length: Math.max(depth, 1) }, () => 0))
@@ -142,14 +170,14 @@ function ModalExcelTableHead({ columns, rawHeaderRows }) {
     return (
       <thead>
         <tr ref={(el) => { rowRefs.current[0] = el }}>
-          {columns.map((col) => (
+          {columnNames.map((name) => (
             <th
-              key={col}
-              title={col}
+              key={name}
+              title={name}
               className={`sticky top-0 z-[3] text-left align-middle ${MODAL_TH}`}
             >
               <span className="block whitespace-normal break-words [overflow-wrap:anywhere]">
-                {col}
+                {name}
               </span>
             </th>
           ))}
@@ -204,8 +232,8 @@ function TableExpandModal({ table, onClose }) {
 
   if (typeof document === 'undefined') return null
 
-  const cols = table.columns || []
-  const colPct = `${100 / Math.max(cols.length, 1)}%`
+  const { columnDefs, columnNames, headerCols } = prepareViewerTable(table)
+  const colPct = `${100 / Math.max(columnNames.length, 1)}%`
   const totalRows = table.row_count ?? table.rows?.length ?? 0
 
   return createPortal(
@@ -225,7 +253,7 @@ function TableExpandModal({ table, onClose }) {
             <div className="text-[15px] font-semibold leading-snug text-ink">{table.title}</div>
             <div className="mt-0.5 text-[12.5px] text-ink-soft">
               {table.sheet ? `Sheet: ${table.sheet} · ` : ''}
-              {Number(totalRows).toLocaleString()} rows · {cols.length} columns
+              {Number(totalRows).toLocaleString()} rows · {columnNames.length} columns
             </div>
           </div>
           <button
@@ -241,20 +269,20 @@ function TableExpandModal({ table, onClose }) {
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 pb-4 pt-3">
           <table className="w-full table-fixed border-collapse text-[11px] leading-tight">
             <colgroup>
-              {cols.map((col) => (
-                <col key={col} style={{ width: colPct }} />
+              {columnNames.map((name) => (
+                <col key={name} style={{ width: colPct }} />
               ))}
             </colgroup>
-            <ModalExcelTableHead columns={cols} rawHeaderRows={table.raw_header_rows} />
+            <ModalExcelTableHead headerCols={headerCols} columnNames={columnNames} />
             <tbody>
               {(table.rows || []).map((row, i) => (
                 <tr key={i} className="bg-white">
-                  {cols.map((col) => {
-                    const val = row[col]
+                  {columnNames.map((colName, colIndex) => {
+                    const val = rowCellValue(row, columnDefs[colIndex], colName, colIndex)
                     const isNull = val == null || val === ''
                     return (
                       <td
-                        key={col}
+                        key={colName}
                         className={`border border-[#c4b9a3] px-2 py-1.5 align-middle ${isNull ? 'italic text-ink-muted' : 'text-ink'}`}
                         title={isNull ? '' : String(val)}
                       >
@@ -277,10 +305,9 @@ function TableExpandModal({ table, onClose }) {
 
 /** Download table as .xlsx with the same multi-level headers as Preview. */
 function downloadTableExcel(table) {
-  const cols = table.columns || []
-  const headerCols = headerColumnsFromRawRows(table.raw_header_rows, cols)
+  const { columnDefs, columnNames, headerCols } = prepareViewerTable(table)
   const { depth, rows: headerRows } = buildMultiLevelHeaderRows(headerCols)
-  const nCols = cols.length
+  const nCols = columnNames.length
   const aoa = Array.from({ length: depth }, () => Array(nCols).fill(''))
   const merges = []
 
@@ -296,7 +323,10 @@ function downloadTableExcel(table) {
   })
 
   ;(table.rows || []).forEach((row) => {
-    aoa.push(cols.map((c) => (row && row[c] != null ? row[c] : '')))
+    aoa.push(columnNames.map((name, i) => {
+      const v = rowCellValue(row, columnDefs[i], name, i)
+      return v != null ? v : ''
+    }))
   })
 
   const ws = XLSX.utils.aoa_to_sheet(aoa)
@@ -491,9 +521,10 @@ export default function TableViewer({ table, onUpdateId, compact = false }) {
     <button className="flex-shrink-0 whitespace-nowrap rounded border border-line bg-white px-2.5 py-[3px] text-[11px] font-semibold text-teal transition-colors hover:bg-[#F4EFE3] hover:border-teal" onClick={startEdit} title="Edit dataset ID">Edit ID</button>
   )
 
+  const { columnDefs, columnNames, headerCols } = prepareViewerTable(table)
   const totalRows = table.row_count ?? table.rows?.length ?? 0
   const rowLimit = compact ? PREVIEW_ROWS : MAX_DISPLAY
-  const displayRows = table.rows.slice(0, rowLimit)
+  const displayRows = (table.rows || []).slice(0, rowLimit)
   const hasMore = totalRows > rowLimit
 
   return (
@@ -512,7 +543,7 @@ export default function TableViewer({ table, onUpdateId, compact = false }) {
           </div>
           <div className="text-[12.5px] text-ink-soft">
             {table.sheet ? `Sheet: ${table.sheet} · ` : ''}
-            {Number(totalRows).toLocaleString()} rows · {table.columns.length} columns
+            {Number(totalRows).toLocaleString()} rows · {columnNames.length} columns
           </div>
         </div>
       ) : (
@@ -534,7 +565,7 @@ export default function TableViewer({ table, onUpdateId, compact = false }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full border border-line bg-[#FFFCF6] px-2.5 py-[3px] text-[11.5px] text-ink-soft">Sheet: {table.sheet}</span>
             <span className="rounded-full border border-line bg-[#FFFCF6] px-2.5 py-[3px] text-[11.5px] text-ink-soft">{Number(totalRows).toLocaleString()} rows</span>
-            <span className="rounded-full border border-line bg-[#FFFCF6] px-2.5 py-[3px] text-[11.5px] text-ink-soft">{table.columns.length} columns</span>
+            <span className="rounded-full border border-line bg-[#FFFCF6] px-2.5 py-[3px] text-[11.5px] text-ink-soft">{columnNames.length} columns</span>
             <button className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-teal px-3.5 py-1.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-teal-dark" onClick={() => downloadTableExcel(table)}>
               <Download className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
               Download Excel
@@ -563,16 +594,16 @@ export default function TableViewer({ table, onUpdateId, compact = false }) {
       <div className="flex min-h-0 flex-col gap-2.5">
         <div className="overflow-auto rounded-lg border border-[#cfc6b4] bg-surface">
           <table className="w-full border-collapse text-[12.5px]">
-            <ExcelTableHead columns={table.columns} rawHeaderRows={table.raw_header_rows} />
+            <ExcelTableHead headerCols={headerCols} columnNames={columnNames} />
             <tbody>
               {displayRows.map((row, i) => (
                 <tr key={i} className="bg-white hover:bg-[#FDFCF9]">
-                  {table.columns.map((col) => {
-                    const val = row[col]
+                  {columnNames.map((colName, colIndex) => {
+                    const val = rowCellValue(row, columnDefs[colIndex], colName, colIndex)
                     const isNull = val == null || val === ''
                     return (
                       <td
-                        key={col}
+                        key={colName}
                         className={`max-w-[220px] overflow-hidden text-ellipsis whitespace-nowrap border border-[#c4b9a3] px-3.5 py-2.5 ${isNull ? 'italic text-ink-muted' : 'text-ink'}`}
                         title={isNull ? '' : String(val)}
                       >

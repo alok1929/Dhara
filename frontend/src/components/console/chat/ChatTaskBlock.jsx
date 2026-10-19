@@ -6,7 +6,8 @@ export default function ChatTaskBlock({ task, onToggleCollapsed, children }) {
   const running = task.status === 'running'
   const errored = task.status === 'error'
   const expanded = !task.collapsed
-  const headerLabel = running ? 'Extracting tables' : task.title
+  const headerLabel = task.title
+    || (running ? 'Working…' : 'Done')
 
   return (
     <div className="overflow-hidden rounded-2xl border border-line/90 bg-white shadow-sm">

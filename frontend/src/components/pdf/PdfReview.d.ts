@@ -19,10 +19,14 @@ export interface PdfReviewProps {
     jobId: string,
     persistResponse?: { grouping?: Record<string, unknown>; filename?: string },
   ) => void | Promise<void>) | null
+  deferContinueProgress?: boolean
+  onContinueProgressStart?: ((jobId: string) => void) | null
+  onContinueProgressError?: ((message: string) => void) | null
 }
 
 export interface PdfReviewHandle {
   continueToGrouping: () => Promise<void>
+  getTablesForPersist: () => Array<Record<string, unknown>>
 }
 
 declare const PdfReview: ForwardRefExoticComponent<PdfReviewProps & RefAttributes<PdfReviewHandle>>

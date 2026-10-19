@@ -36,3 +36,15 @@ export function stepForChatPillId(pillId) {
   const pill = CHAT_STAGE_PILLS.find((p) => p.id === pillId)
   return pill?.steps?.[0] ?? 1
 }
+
+/** Default chat right-panel stage when none is explicitly selected (not used at step 1). */
+export function chatDefaultRightPanelStage(step, { pdfReviewJobId, hasPreviewTables, isPdfRelease }) {
+  const s = Number(step) || 1
+  if (s === 2 && pdfReviewJobId) return 'preview'
+  if (s === 2 && hasPreviewTables && !isPdfRelease) return 'preview'
+  if (s === 3 || s === 4) return 'grouping'
+  if (s === 5) return 'classification'
+  if (s === 6) return 'harmonisation'
+  if (s === 7) return 'publish'
+  return null
+}
