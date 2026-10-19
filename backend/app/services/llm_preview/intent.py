@@ -9,6 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from app.services.llm_prompts import (
+    LLM_GROUPING_INTENT_EXTRA,
     LLM_PREVIEW_INTENT_HUMAN_PROMPT,
     LLM_PREVIEW_INTENT_SYSTEM_PROMPT,
     OPENAI_MODEL,
@@ -29,6 +30,8 @@ def normalize_action_plan(plan: LlmActionPlan) -> LlmActionPlan:
         plan.type = LlmActionType.bulk_download
     if plan.type == LlmActionType.delete and len(plan.table_names) >= _BULK_FIND_MIN:
         plan.type = LlmActionType.bulk_delete
+    if plan.type == LlmActionType.propose_group and len(plan.table_names) >= _BULK_FIND_MIN:
+        plan.type = LlmActionType.bulk_propose_group
     return plan
 
 
@@ -38,6 +41,7 @@ def plan_from_user_request(
     catalog: List[Dict[str, Any]],
     api_key: str,
     prompt: Optional[str] = None,
+    stage: str = "preview",
 ) -> LlmActionPlan:
     """Ask the LLM for an action plan; sanitize table_names against catalog ids."""
     text = (user_request or "").strip()
@@ -73,10 +77,14 @@ def plan_from_user_request(
         if isinstance(c, dict) and c.get("table_id")
     ]
 
+    system = LLM_PREVIEW_INTENT_SYSTEM_PROMPT
+    if (stage or "").strip().lower() == "grouping":
+        system = system + LLM_GROUPING_INTENT_EXTRA
+
     structured = llm.with_structured_output(LlmActionPlan)
     chat_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", LLM_PREVIEW_INTENT_SYSTEM_PROMPT),
+            ("system", system),
             ("human", LLM_PREVIEW_INTENT_HUMAN_PROMPT),
         ]
     )
@@ -99,6 +107,17 @@ def plan_from_user_request(
 
     plan.table_names = sanitize_table_ids(plan.table_names, valid_ids)
     plan = normalize_action_plan(plan)
+    if not (plan.group_name or "").strip() and plan.type in (
+        LlmActionType.propose_group,
+        LlmActionType.bulk_propose_group,
+    ):
+        if plan.table_names:
+            first = compact_catalog[0] if compact_catalog else {}
+            for entry in compact_catalog:
+                if entry.get("table_id") in plan.table_names:
+                    first = entry
+                    break
+            plan.group_name = str(first.get("name") or "Proposed group")[:120]
     if not (plan.rationale or "").strip():
         if plan.table_names:
             plan.rationale = f"Matched {len(plan.table_names)} table(s)."

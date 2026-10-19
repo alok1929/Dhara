@@ -237,6 +237,14 @@ async def pdf_delete_tables(job_id: str, request: Request, user_email: str = Dep
         if not job_extraction_complete(job["status"]):
             raise HTTPException(409, f"Job not finished yet (status={job['status']})")
         result = soft_delete_tables(job, ids, save=_save_pdf_job)
+    try:
+        from app.db.session import session_scope
+        from app.services.llm_preview.grouping import sync_soft_deletes_to_postgres
+
+        with session_scope() as session:
+            sync_soft_deletes_to_postgres(session, job_id, ids)
+    except Exception:
+        pass
     return result
 
 

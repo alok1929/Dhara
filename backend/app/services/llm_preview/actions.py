@@ -97,6 +97,9 @@ def execute_action_plan(
         selected = [tid for tid in scope if tid in by_id and _needs_human_review(by_id[tid])]
     elif action == LlmActionType.find_ai_review_needed:
         selected = [tid for tid in scope if tid in by_id and _needs_ai_review(by_id[tid])]
+    elif action in (LlmActionType.propose_group, LlmActionType.bulk_propose_group):
+        selected = scope
+        executed = False
     else:
         selected = scope
 
@@ -114,6 +117,8 @@ def execute_action_plan(
         executed = bool(files)
     elif action in (LlmActionType.delete, LlmActionType.bulk_delete):
         executed = False
+    elif action in (LlmActionType.propose_group, LlmActionType.bulk_propose_group):
+        executed = False
 
     message: Optional[str] = None
     if action in (LlmActionType.delete, LlmActionType.bulk_delete) and selected:
@@ -121,6 +126,13 @@ def execute_action_plan(
             "Confirm delete via POST /api/pdf/jobs/{job_id}/tables/delete "
             "or llm_input with confirm_delete=true"
         )
+    if action in (LlmActionType.propose_group, LlmActionType.bulk_propose_group) and selected:
+        message = (
+            "Confirm grouping via llm_input with confirm_apply_group=true "
+            "or save groups in guided Grouping UI"
+        )
+
+    group_name = (plan.group_name or "").strip() or None
 
     out: Dict[str, Any] = {
         "type": action.value if isinstance(action, LlmActionType) else str(action),
@@ -135,4 +147,6 @@ def execute_action_plan(
         out["files"] = files
     if message:
         out["message"] = message
+    if group_name:
+        out["group_name"] = group_name
     return out

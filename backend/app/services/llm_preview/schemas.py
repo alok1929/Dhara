@@ -16,6 +16,8 @@ class LlmActionType(str, Enum):
     bulk_download = "bulk_download"
     find_review_needed = "find_review_needed"
     find_ai_review_needed = "find_ai_review_needed"
+    propose_group = "propose_group"
+    bulk_propose_group = "bulk_propose_group"
 
 
 class PreviewCatalogEntry(BaseModel):
@@ -35,6 +37,10 @@ class LlmActionPlan(BaseModel):
         description="table_id values from the catalog (single or many)",
     )
     rationale: str = Field(default="")
+    group_name: str = Field(
+        default="",
+        description="Short title for a proposed table group (grouping stage only)",
+    )
 
     @field_validator("table_names", mode="before")
     @classmethod
@@ -66,7 +72,11 @@ class LlmInputResponse(BaseModel):
     """Stable JSON shape for POST llm_input (and notebook / frontend clients)."""
 
     job_id: Optional[str] = None
+    stage: str = "preview"
+    pipeline_step: Optional[int] = None
     type: str
+    group_name: Optional[str] = None
+    grouping: Optional[Dict[str, Any]] = None
     table_ids: List[str] = Field(default_factory=list)
     table_names: Dict[str, str] = Field(
         default_factory=dict,

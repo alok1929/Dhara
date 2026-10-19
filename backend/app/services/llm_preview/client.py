@@ -24,6 +24,8 @@ def post_llm_input(
     refresh: bool = False,
     force_summarize: bool = False,
     confirm_delete: bool = False,
+    confirm_apply_group: bool = False,
+    stage: str = "preview",
     timeout: float = 300,
 ) -> Dict[str, Any]:
     """
@@ -44,6 +46,10 @@ def post_llm_input(
         body["force_summarize"] = True
     if confirm_delete:
         body["confirm_delete"] = True
+    if confirm_apply_group:
+        body["confirm_apply_group"] = True
+    if stage and stage.strip().lower() != "preview":
+        body["stage"] = stage.strip().lower()
 
     hdrs = dict(headers or {})
     hdrs.setdefault("Content-Type", "application/json")

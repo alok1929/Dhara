@@ -17,7 +17,15 @@ from app.services.llm_preview import (
     execute_action_plan,
     plan_from_user_request,
 )
+from app.db.session import session_scope
+from app.services.llm_preview.grouping import (
+    ensure_persisted_tables,
+    grouping_catalog_from_tables,
+    merge_proposed_group,
+    sync_soft_deletes_to_postgres,
+)
 from app.services.llm_preview.schemas import LlmInputResponse
+from app.services.preview.access import grouping_pipeline_step, preview_pipeline_step
 from app.services.preview import (
     PreviewJobError,
     append_llm_turn,
@@ -39,6 +47,14 @@ from app.workers.extraction_jobs import (
 )
 
 router = APIRouter(tags=["LLM Preview"])
+
+
+def _sync_deletes_to_postgres(job_id: str, table_ids: list[str]) -> None:
+    try:
+        with session_scope() as session:
+            sync_soft_deletes_to_postgres(session, job_id, table_ids)
+    except Exception:
+        pass
 
 
 def _require_api_key(request: Request, user: CurrentUser, db: Session) -> str:
@@ -170,6 +186,9 @@ async def _handle_llm_input(
     - force_summarize (optional bool) — with refresh, rewrite catalog via LangChain
     - confirm_delete (optional bool) — for delete/bulk_delete, soft-delete via the same
       ``deleted_table_ids`` path as guided Preview (POST /pdf/.../tables/delete)
+    - stage (optional str) — ``preview`` (default) or ``grouping`` for Grouping-step chat
+    - confirm_apply_group (optional bool) — apply ``propose_group`` / ``bulk_propose_group``
+      to Postgres grouping (same as guided Grouping UI)
     """
     try:
         body = await request.json()
@@ -188,16 +207,22 @@ async def _handle_llm_input(
     refresh = bool(body.get("refresh"))
     force_summarize = bool(body.get("force_summarize"))
     confirm_delete = bool(body.get("confirm_delete"))
+    confirm_apply_group = bool(body.get("confirm_apply_group"))
+    stage = str(body.get("stage") or "preview").strip().lower() or "preview"
+    if stage not in ("preview", "grouping"):
+        raise HTTPException(400, "stage must be 'preview' or 'grouping'")
     client_tables = body.get("tables")
 
     api_key = _require_api_key(request, user, db)
 
+    filename = None
     with _pdf_jobs_lock:
         job = _get_pdf_job(job_id)
         try:
             job = require_finished_job(job, user=user)
         except PreviewJobError as e:
             raise HTTPException(e.status_code, e.message) from e
+        filename = job.get("filename")
 
         tables = review_tables_for_job(job)
         if persist_reviews and isinstance(client_tables, list) and client_tables:
@@ -206,8 +231,25 @@ async def _handle_llm_input(
         else:
             overlay_client_tables(tables, client_tables)
 
+        if stage == "grouping":
+            ensure_preview_pipeline_step(job)
+            job["pipeline_step"] = max(int(job.get("pipeline_step") or 0), grouping_pipeline_step())
+
         catalog = get_llm_preview_catalog(job)
-        needs_catalog = refresh or catalog is None
+        needs_catalog = refresh or catalog is None or stage == "grouping"
+
+    persisted_for_grouping: list[dict] | None = None
+    if stage == "grouping":
+        with session_scope() as session:
+            persisted_for_grouping = ensure_persisted_tables(
+                session,
+                job_id=job_id,
+                user_email=user.email,
+                filename=filename,
+                tables=tables,
+            )
+        if persisted_for_grouping:
+            tables = persisted_for_grouping
 
     if needs_catalog:
         try:
@@ -219,7 +261,11 @@ async def _handle_llm_input(
                     api_key=api_key,
                 )
             else:
-                catalog = build_llm_preview_catalog(tables, force_summarize=False)
+                catalog = (
+                    grouping_catalog_from_tables(tables)
+                    if stage == "grouping"
+                    else build_llm_preview_catalog(tables, force_summarize=False)
+                )
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         except Exception as e:
@@ -241,6 +287,7 @@ async def _handle_llm_input(
             catalog=catalog,
             api_key=api_key,
             prompt=prompt,
+            stage=stage,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -252,7 +299,10 @@ async def _handle_llm_input(
         job = _get_pdf_job(job_id)
         if not job_visible_to(job, user):
             raise HTTPException(404, "Job not found")
-        live_tables = review_tables_for_job(job)
+        if stage == "grouping" and persisted_for_grouping:
+            live_tables = list(persisted_for_grouping)
+        else:
+            live_tables = review_tables_for_job(job)
         if not persist_reviews:
             overlay_client_tables(live_tables, client_tables)
 
@@ -267,8 +317,26 @@ async def _handle_llm_input(
                 if not job_visible_to(job, user):
                     raise HTTPException(404, "Job not found")
                 soft_delete_tables(job, to_delete, save=_save_pdf_job)
+            _sync_deletes_to_postgres(job_id, to_delete)
             result["executed"] = True
             result["deleted"] = to_delete
+            result.pop("message", None)
+        else:
+            result["executed"] = False
+
+    if confirm_apply_group and action_type in ("propose_group", "bulk_propose_group"):
+        gname = str(result.get("group_name") or plan.group_name or "").strip()
+        tids = list(result.get("table_ids") or [])
+        if gname and tids:
+            with session_scope() as session:
+                grouping = merge_proposed_group(
+                    session,
+                    job_id,
+                    group_name=gname,
+                    table_ids=tids,
+                )
+            result["executed"] = True
+            result["grouping"] = grouping
             result.pop("message", None)
         else:
             result["executed"] = False
@@ -288,7 +356,10 @@ async def _handle_llm_input(
             )
             _save_pdf_job(job)
 
-    payload = {**result, "job_id": job_id}
+    pipeline_step = (
+        grouping_pipeline_step() if stage == "grouping" else preview_pipeline_step()
+    )
+    payload = {**result, "job_id": job_id, "stage": stage, "pipeline_step": pipeline_step}
     return LlmInputResponse.model_validate(payload).model_dump()
 
 

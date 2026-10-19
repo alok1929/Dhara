@@ -673,6 +673,15 @@ Matching rules (accuracy over recall):
 
 Output ONLY the structured fields: type, table_names, rationale."""
 
+LLM_GROUPING_INTENT_EXTRA = """
+
+Grouping stage (when the steward wants to **group**, **combine**, or **bundle** tables):
+- propose_group — one or two matching tables to put in a new/edited group
+- bulk_propose_group — three or more matching tables for one group
+- Always set group_name to a short descriptive bundle title (e.g. "Condiment and spice crops").
+- If the steward only asks to find/show/download/delete (no grouping language), use find/bulk_find/delete/download as usual.
+- Never invent table_ids."""
+
 LLM_PREVIEW_INTENT_HUMAN_PROMPT = """Optional steward context:
 {prompt}
 

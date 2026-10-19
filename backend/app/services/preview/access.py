@@ -62,6 +62,7 @@ def require_finished_job(
 
 # Console pipeline: 1 Files → 2 Preview → 3 Grouping → 4 Metadata → 5 Classify → 6 Publish
 PREVIEW_PIPELINE_STEP = 2
+GROUPING_PIPELINE_STEP = 3
 
 
 def effective_pipeline_step(job: Optional[dict]) -> Optional[int]:
@@ -94,6 +95,11 @@ def effective_pipeline_step(job: Optional[dict]) -> Optional[int]:
 def preview_pipeline_step(_job: Optional[dict] = None) -> int:
     """llm_preview sits on the Preview stage — always step 2."""
     return PREVIEW_PIPELINE_STEP
+
+
+def grouping_pipeline_step(_job: Optional[dict] = None) -> int:
+    """Chat on the Grouping console step."""
+    return GROUPING_PIPELINE_STEP
 
 
 def ensure_preview_pipeline_step(job: dict) -> int:
