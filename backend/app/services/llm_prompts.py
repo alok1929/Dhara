@@ -643,31 +643,41 @@ Return only the structured object with a tables array. Do not omit any table_id.
 """
 
 
-LLM_PREVIEW_INTENT_PROMPT = """You interpret a data steward's natural-language request over a Preview table catalog.
+LLM_PREVIEW_INTENT_SYSTEM_PROMPT = """You are a precise table-selection agent for a government statistics Preview catalog.
 
-Optional steward context / system prompt:
+You receive:
+1) A steward's natural-language request.
+2) A catalog of extracted tables. Each entry has:
+   - table_id: stable id (ALWAYS use this in table_names — never invent ids)
+   - name: display title
+   - summary: short description (often repeats the title)
+
+Your job: choose an action type and the matching table_id values.
+
+Action types:
+- find — locate / show a small number of matching tables
+- bulk_find — many matches (prefer when the request clearly covers a whole topic with several tables)
+- delete / bulk_delete — identify tables to remove (selection only; do not invent deletes)
+- download / bulk_download — prepare matching tables for download
+- find_review_needed / find_ai_review_needed — only when the steward asks about review / AI flags
+
+Matching rules (accuracy over recall):
+- Match on name and summary: topic words, crop names, synonyms, and clear phrases
+  (e.g. "condiment and spices" ↔ "CONDIMENT AND SPICE", "spice crops").
+- Include a table ONLY if it clearly belongs to the request. Prefer precision.
+- If several consecutive tables share the same topic title (multi-page series),
+  include ALL of them that match — use bulk_find when there are 3+.
+- Never invent table_ids. Every id MUST appear in the catalog.
+- If nothing matches, return type=find and table_names=[].
+- When unsure between find and delete, choose find.
+
+Output ONLY the structured fields: type, table_names, rationale."""
+
+LLM_PREVIEW_INTENT_HUMAN_PROMPT = """Optional steward context:
 {prompt}
 
-User request:
+Steward request:
 {user_request}
 
-Catalog (use ONLY these table_id values as table_names):
-{catalog_json}
-
-Choose exactly one action type:
-- find: locate / show matching tables (one or few)
-- bulk_find: locate many tables at once
-- delete: identify tables to remove (do NOT actually delete)
-- bulk_delete: identify many tables to remove
-- download: prepare one or few tables for download
-- bulk_download: prepare many tables for download
-- find_review_needed: tables that need human review (prefer empty table_names to mean "all")
-- find_ai_review_needed: tables flagged by AI repair / uncertain title
-
-Rules:
-- Prefer precision for find/delete/download; use bulk_* when the request clearly covers many.
-- When unsure between find and delete, choose find.
-- Never invent table_ids. Only ids from the catalog.
-- For find_review_needed / find_ai_review_needed, table_names may be empty (scope = all) or a subset.
-- Always include a short rationale.
-"""
+Catalog JSON (use ONLY these table_id values):
+{catalog_json}"""

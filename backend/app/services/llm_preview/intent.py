@@ -8,11 +8,28 @@ from typing import Any, Dict, List, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from app.services.llm_prompts import LLM_PREVIEW_INTENT_PROMPT, OPENAI_MODEL
+from app.services.llm_prompts import (
+    LLM_PREVIEW_INTENT_HUMAN_PROMPT,
+    LLM_PREVIEW_INTENT_SYSTEM_PROMPT,
+    OPENAI_MODEL,
+)
 from app.services.llm_preview.schemas import LlmActionPlan, LlmActionType
 from app.services.preview.tables import sanitize_table_ids
 
 logger = logging.getLogger(__name__)
+
+_BULK_FIND_MIN = 3
+
+
+def normalize_action_plan(plan: LlmActionPlan) -> LlmActionPlan:
+    """Align LLM output with notebook heuristics (e.g. promote find → bulk_find)."""
+    if plan.type == LlmActionType.find and len(plan.table_names) >= _BULK_FIND_MIN:
+        plan.type = LlmActionType.bulk_find
+    if plan.type == LlmActionType.download and len(plan.table_names) >= _BULK_FIND_MIN:
+        plan.type = LlmActionType.bulk_download
+    if plan.type == LlmActionType.delete and len(plan.table_names) >= _BULK_FIND_MIN:
+        plan.type = LlmActionType.bulk_delete
+    return plan
 
 
 def plan_from_user_request(
@@ -46,11 +63,21 @@ def plan_from_user_request(
         temperature=0,
         api_key=api_key.strip(),
     )
+    compact_catalog = [
+        {
+            "table_id": str(c.get("table_id") or "").strip(),
+            "name": str(c.get("name") or ""),
+            "summary": str(c.get("summary") or "")[:240],
+        }
+        for c in catalog
+        if isinstance(c, dict) and c.get("table_id")
+    ]
+
     structured = llm.with_structured_output(LlmActionPlan)
     chat_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", "You classify steward requests into Preview table actions."),
-            ("human", LLM_PREVIEW_INTENT_PROMPT),
+            ("system", LLM_PREVIEW_INTENT_SYSTEM_PROMPT),
+            ("human", LLM_PREVIEW_INTENT_HUMAN_PROMPT),
         ]
     )
     chain = chat_prompt | structured
@@ -60,7 +87,7 @@ def plan_from_user_request(
             {
                 "prompt": (prompt or "").strip() or "(none)",
                 "user_request": text,
-                "catalog_json": json.dumps(catalog, ensure_ascii=False),
+                "catalog_json": json.dumps(compact_catalog, ensure_ascii=False),
             }
         )
     except Exception as e:
@@ -71,6 +98,7 @@ def plan_from_user_request(
         plan = LlmActionPlan.model_validate(plan)
 
     plan.table_names = sanitize_table_ids(plan.table_names, valid_ids)
+    plan = normalize_action_plan(plan)
     if not (plan.rationale or "").strip():
         if plan.table_names:
             plan.rationale = f"Matched {len(plan.table_names)} table(s)."

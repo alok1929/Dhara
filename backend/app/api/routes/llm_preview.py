@@ -17,6 +17,7 @@ from app.services.llm_preview import (
     execute_action_plan,
     plan_from_user_request,
 )
+from app.services.llm_preview.schemas import LlmInputResponse
 from app.services.preview import (
     PreviewJobError,
     append_llm_turn,
@@ -137,7 +138,7 @@ async def get_llm_preview_data(
     if catalog is None:
         raise HTTPException(
             404,
-            "llm_preview catalog not built yet — POST llm_preview_data first",
+            "llm_preview catalog not built yet — POST llm_preview_data or send a user_request to llm_input",
         )
 
     return {
@@ -150,12 +151,11 @@ async def get_llm_preview_data(
     }
 
 
-@router.post("/api/llm_preview/jobs/{job_id}/llm_input")
-async def post_llm_input(
+async def _handle_llm_input(
     job_id: str,
     request: Request,
-    user: CurrentUser = Depends(require_user),
-    db: Session = Depends(get_db),
+    user: CurrentUser,
+    db: Session,
 ):
     """
     Interpret ``user_request`` over the job catalog and return ``table_data``.
@@ -175,9 +175,11 @@ async def post_llm_input(
     if not isinstance(body, dict):
         body = {}
 
-    user_request = str(body.get("user_request") or "").strip()
+    user_request = str(
+        body.get("user_request") or body.get("user_query") or ""
+    ).strip()
     if not user_request:
-        raise HTTPException(400, "user_request is required")
+        raise HTTPException(400, "user_request (or user_query) is required")
     prompt = str(body.get("prompt") or "").strip() or None
     persist_reviews = bool(body.get("persist_reviews"))
     refresh = bool(body.get("refresh"))
@@ -260,11 +262,33 @@ async def post_llm_input(
                 {
                     "user_request": user_request,
                     "type": result.get("type"),
-                    "table_names": result.get("table_names") or [],
+                    "table_ids": result.get("table_ids") or [],
                     "rationale": result.get("rationale") or "",
                 },
             )
             _save_pdf_job(job)
 
-    result["job_id"] = job_id
-    return result
+    payload = {**result, "job_id": job_id}
+    return LlmInputResponse.model_validate(payload).model_dump()
+
+
+@router.post("/api/llm_preview/jobs/{job_id}/llm_input")
+async def post_llm_input(
+    job_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Interpret ``user_request`` (LangChain) and return structured Preview actions + ``table_data``."""
+    return await _handle_llm_input(job_id, request, user, db)
+
+
+@router.post("/api/llm_preview/jobs/{job_id}/chat")
+async def post_llm_chat(
+    job_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Alias for ``llm_input`` — single chat entrypoint for steward queries."""
+    return await _handle_llm_input(job_id, request, user, db)

@@ -1,8 +1,6 @@
-"""Catalogue wizard Excel/SQL extract (separate from upload grid ingest).
-"""
+"""Catalogue wizard Excel/SQL extract (separate from upload grid ingest)."""
 from app.services.ingestion.wizard.extractor import TableExtractor
 from app.services.ingestion.wizard.original_sheet_export import extract_sheet_with_formatting_from_bytes
-from app.services.ingestion.wizard.sql_extract import extract_tables_from_sql
 from app.services.ingestion.wizard.table_export import safe_download_stem, table_to_excel_bytes
 
 __all__ = [
@@ -12,3 +10,12 @@ __all__ = [
     "safe_download_stem",
     "table_to_excel_bytes",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy import so notebook / preview paths avoid psycopg2 unless SQL extract is used."""
+    if name == "extract_tables_from_sql":
+        from app.services.ingestion.wizard.sql_extract import extract_tables_from_sql
+
+        return extract_tables_from_sql
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

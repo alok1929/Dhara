@@ -56,6 +56,15 @@ def _table_data_for_ids(
     return {tid: by_id[tid] for tid in ids if tid in by_id}
 
 
+def _display_name(table: dict, table_id: str) -> str:
+    title = str(table.get("title") or table.get("name") or "").strip()
+    return title or table_id
+
+
+def _table_name_map(by_id: Dict[str, dict], ids: Sequence[str]) -> Dict[str, str]:
+    return {tid: _display_name(by_id[tid], tid) for tid in ids if tid in by_id}
+
+
 def execute_action_plan(
     plan: LlmActionPlan,
     tables: List[dict],
@@ -92,14 +101,35 @@ def execute_action_plan(
         selected = scope
 
     table_data = _table_data_for_ids(by_id, selected)
+    name_map = _table_name_map(by_id, selected)
+
+    if action in (LlmActionType.find, LlmActionType.bulk_find):
+        executed = bool(selected)
+    elif action in (
+        LlmActionType.find_review_needed,
+        LlmActionType.find_ai_review_needed,
+    ):
+        executed = bool(selected)
+    elif action in (LlmActionType.download, LlmActionType.bulk_download):
+        executed = bool(files)
+    elif action in (LlmActionType.delete, LlmActionType.bulk_delete):
+        executed = False
+
+    message: Optional[str] = None
+    if action in (LlmActionType.delete, LlmActionType.bulk_delete) and selected:
+        message = "Confirm delete via POST /api/pdf/jobs/{job_id}/tables/delete"
 
     out: Dict[str, Any] = {
         "type": action.value if isinstance(action, LlmActionType) else str(action),
-        "table_names": selected,
+        "table_ids": selected,
+        "table_names": name_map,
         "rationale": plan.rationale or "",
         "executed": executed,
         "table_data": table_data,
+        "count": len(selected),
     }
     if files is not None:
         out["files"] = files
+    if message:
+        out["message"] = message
     return out

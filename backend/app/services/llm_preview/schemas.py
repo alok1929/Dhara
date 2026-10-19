@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -53,3 +53,28 @@ class CatalogSummarizeResult(BaseModel):
     """Structured LLM output for catalog summarization."""
 
     tables: List[PreviewCatalogEntry] = Field(default_factory=list)
+
+
+class LlmDownloadFile(BaseModel):
+    table_id: str
+    filename: str
+    media_type: str
+    content_base64: str
+
+
+class LlmInputResponse(BaseModel):
+    """Stable JSON shape for POST llm_input (and notebook / frontend clients)."""
+
+    job_id: Optional[str] = None
+    type: str
+    table_ids: List[str] = Field(default_factory=list)
+    table_names: Dict[str, str] = Field(
+        default_factory=dict,
+        description="table_id → display name (notebook-compatible map)",
+    )
+    rationale: str = ""
+    executed: bool = False
+    table_data: Dict[str, Any] = Field(default_factory=dict)
+    files: Optional[List[LlmDownloadFile]] = None
+    message: Optional[str] = None
+    count: int = 0

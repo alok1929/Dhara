@@ -42,9 +42,11 @@ def test_find_returns_subset_table_data():
     )
     out = execute_action_plan(plan, _tables())
     assert out["type"] == "find"
-    assert out["table_names"] == ["t1", "t3"]
+    assert out["table_ids"] == ["t1", "t3"]
+    assert set(out["table_names"].keys()) == {"t1", "t3"}
     assert set(out["table_data"].keys()) == {"t1", "t3"}
-    assert out["executed"] is False
+    assert out["executed"] is True
+    assert out["count"] == 2
     assert "files" not in out
 
 
@@ -58,6 +60,7 @@ def test_delete_does_not_execute():
     assert out["type"] == "bulk_delete"
     assert out["executed"] is False
     assert "t2" in out["table_data"]
+    assert out["message"]
 
 
 def test_find_review_needed_filters_scope():
@@ -67,7 +70,7 @@ def test_find_review_needed_filters_scope():
         rationale="review",
     )
     out = execute_action_plan(plan, _tables())
-    assert out["table_names"] == ["t1"]
+    assert out["table_ids"] == ["t1"]
     assert set(out["table_data"].keys()) == {"t1"}
 
 
@@ -78,7 +81,7 @@ def test_find_ai_review_needed_includes_repaired_and_uncertain():
         rationale="ai",
     )
     out = execute_action_plan(plan, _tables())
-    assert set(out["table_names"]) == {"t1", "t2"}
+    assert set(out["table_ids"]) == {"t1", "t2"}
 
 
 def test_download_includes_base64_files():

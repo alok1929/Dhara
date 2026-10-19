@@ -6,13 +6,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
-import anthropic
-from anthropic import RateLimitError as AnthropicRateLimitError
 import openai
 from openai import RateLimitError as OpenAIRateLimitError
 
 from app.services.llm_prompts import (
-    ANTHROPIC_MODEL,
     OPENAI_MODEL,
     excel_catalogue_enrichment_prompt,
     excel_category_metadata_prompt,
@@ -92,15 +89,6 @@ def _build_ddi_id(tbl: dict) -> str:
     return "_".join(parts)
 
 
-def _detect_provider(api_key: Optional[str]) -> str:
-    """Guess the LLM provider from an API key's prefix. Anthropic-style keys
-    are \"sk-ant-...\"; anything else is treated as an OpenAI-compatible
-    MEITY-empanelled endpoint."""
-    if api_key and api_key.startswith("sk-ant-"):
-        return "anthropic"
-    return "openai"
-
-
 def _parse_retry_delay(error: Exception) -> Optional[float]:
     """
     Extract the server-suggested retry delay from a 429 error body.
@@ -151,7 +139,7 @@ def _call_with_retry(call, max_retries: int = 3):
     for attempt in range(max_retries):
         try:
             return call()
-        except (AnthropicRateLimitError, OpenAIRateLimitError) as e:
+        except OpenAIRateLimitError as e:
             if attempt == max_retries - 1:
                 raise
             wait = _parse_retry_delay(e) or (30 * (2 ** attempt))
@@ -186,17 +174,15 @@ def _extract_json_with_key(text: str, required_key: str) -> Optional[Dict]:
 
 class TableExtractor:
     def __init__(self, api_key: Optional[str] = None, skip_llm: bool = False, provider: Optional[str] = None):
+        del provider  # OpenAI-compatible endpoint only; kept for call-site compatibility
         self.skip_llm = skip_llm
-        self.provider = provider or _detect_provider(api_key)
         # Don't touch the SDK at all in skip_llm mode -- constructing it raises
         # if no API key is configured anywhere, which would otherwise make
         # SKIP_LLM=1 unusable without also having a (unused) key set.
         if skip_llm:
             self.client = None
-        elif self.provider == "openai":
-            self.client = openai.OpenAI(api_key=api_key)
         else:
-            self.client = anthropic.Anthropic(api_key=api_key)
+            self.client = openai.OpenAI(api_key=api_key)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -208,8 +194,8 @@ class TableExtractor:
 
         # Process sheets concurrently -- each sheet is 1+ independent LLM calls,
         # and a large workbook (e.g. 36 sheets) run sequentially is the main
-        # source of slowness. Capped at 5 workers to stay well under Anthropic
-        # rate limits; _call_with_retry still backs off if we hit them anyway.
+        # source of slowness. Capped at 5 workers to reduce LLM rate-limit pressure;
+        # _call_with_retry still backs off if we hit them anyway.
         sheets = [(name, wb[name]) for name in wb.sheetnames]
         results_by_sheet: List[List[Dict]] = [[] for _ in sheets]
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
@@ -270,8 +256,7 @@ class TableExtractor:
                     results.append(tbl)
             except Exception as e:
                 print(f"[{sheet_name}] block {start}-{end} error: {e}")
-            # This pause only exists to stay under Anthropic rate limits between
-            # per-block LLM calls -- skip it entirely when there are none.
+            # Brief pause between per-block LLM calls to reduce rate-limit pressure.
             if not self.skip_llm and idx < len(blocks) - 1:
                 time.sleep(3)
         return results
@@ -710,24 +695,16 @@ class TableExtractor:
             body_start += 1
         return table_id, title, body_start
 
-    # ── LLM completion (provider-agnostic) ───────────────────────────────────
+    # ── LLM completion (OpenAI-compatible chat API) ──────────────────────────
 
     def _complete(self, prompt: str, max_tokens: int) -> str:
-        """Single-turn plain-text completion, routed to whichever provider
-        this extractor was constructed for."""
-        if self.provider == "openai":
-            resp = _call_with_retry(lambda: self.client.chat.completions.create(
-                model=OPENAI_MODEL,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            ))
-            return resp.choices[0].message.content.strip()
-        resp = _call_with_retry(lambda: self.client.messages.create(
-            model=ANTHROPIC_MODEL,
+        """Single-turn plain-text completion via the OpenAI-compatible chat API."""
+        resp = _call_with_retry(lambda: self.client.chat.completions.create(
+            model=OPENAI_MODEL,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         ))
-        return resp.content[0].text.strip()
+        return resp.choices[0].message.content.strip()
 
     # ─────────────────────────────────────────────────────────────────────────
     # STRATEGY A — Direct LLM (single prompt → single response)
@@ -825,7 +802,7 @@ class TableExtractor:
     # ── DES Catalogue enrichment ──────────────────────────────────────────────
 
     def enrich_for_catalogue(self, table: dict) -> dict:
-        """Use Claude to generate DES-catalogue-compatible metadata for one table."""
+        """Use the LLM to generate DES-catalogue-compatible metadata for one table."""
         if self.skip_llm:
             return {
                 "short_description": table.get("title", "") or table.get("table_id", ""),
