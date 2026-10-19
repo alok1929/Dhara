@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import pathlib
 import uuid
-import zipfile
 from typing import Any, List, Optional
 
 import json
@@ -23,6 +20,14 @@ from app.api.dependencies import (
     resolve_llm_credentials,
 )
 from app.db.session import session_scope
+from app.services.preview import (
+    apply_overlay_to_job_reviews,
+    job_visible_to as _job_visible_to,
+    overlay_client_tables,
+    soft_delete_tables,
+    table_xlsx_bytes_and_filename,
+    tables_to_zip_bytes,
+)
 from app.workers.extraction_jobs import (
     _get_pdf_job,
     _hydrate_user_pdf_jobs,
@@ -38,19 +43,8 @@ from app.workers.extraction_jobs import (
     job_extraction_complete,
     queue_extraction_job,
 )
-from app.services.ingestion.wizard.table_export import safe_download_stem, table_to_excel_bytes
 
 router = APIRouter(tags=["PDF"])
-
-
-def _job_visible_to(job: Optional[dict], user: CurrentUser) -> bool:
-    """Owner email match plus organisation_id when the job is tenant-tagged."""
-    if not job or job.get("user_email") != user.email:
-        return False
-    job_org = job.get("organisation_id")
-    if job_org and str(job_org) != str(user.organisation_id):
-        return False
-    return True
 
 
 def _parse_dataset_id_config_form(raw: Optional[str]) -> Optional[dict]:
@@ -242,15 +236,8 @@ async def pdf_delete_tables(job_id: str, request: Request, user_email: str = Dep
             raise HTTPException(404, "Job not found")
         if not job_extraction_complete(job["status"]):
             raise HTTPException(409, f"Job not finished yet (status={job['status']})")
-        deleted = set(job.get("deleted_table_ids") or [])
-        deleted.update(ids)
-        job["deleted_table_ids"] = sorted(deleted)
-        reviews = job.get("reviews") or {}
-        for tid in ids:
-            reviews.pop(tid, None)
-        job["reviews"] = reviews
-        _save_pdf_job(job)
-    return {"ok": True, "deleted": ids, "deleted_count": len(ids)}
+        result = soft_delete_tables(job, ids, save=_save_pdf_job)
+    return result
 
 
 @router.post("/api/pdf/jobs/{job_id}/tables/ai-search")
@@ -290,20 +277,7 @@ async def pdf_ai_search_tables(
         tables = _pdf_tables_from_job(job)
 
     # Prefer titles / summaries from the live Preview payload when sent.
-    client_tables = body.get("tables")
-    if isinstance(client_tables, list) and client_tables:
-        by_id = {
-            str(t.get("table_id")): t
-            for t in client_tables
-            if isinstance(t, dict) and t.get("table_id")
-        }
-        for t in tables:
-            override = by_id.get(str(t.get("table_id") or ""))
-            if not override:
-                continue
-            for key in ("title", "banner_table_id", "short_description", "description", "summary"):
-                if key in override:
-                    t[key] = override.get(key)
+    overlay_client_tables(tables, body.get("tables"))
 
     try:
         result = await asyncio.to_thread(
@@ -453,31 +427,12 @@ async def pdf_download_table(job_id: str, table_id: str, user_email: str = Depen
     if not table:
         raise HTTPException(404, "Table not found (it may have been deleted)")
 
-    xlsx = table_to_excel_bytes(table)
-    stem = safe_download_stem(table, fallback=f"table_{table_id}")
-    filename = f"{stem}.xlsx"
+    xlsx, filename = table_xlsx_bytes_and_filename(table, table_id=table_id)
     return Response(
         content=xlsx,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-
-
-def _pdf_tables_zip_bytes(tables: list, job_name: str, job_id: str) -> tuple[bytes, str]:
-    """Build a ZIP of .xlsx files; returns (zip_bytes, download_filename)."""
-    buf = io.BytesIO()
-    used_names: set = set()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for t in tables:
-            tid = str(t.get("table_id") or "table")
-            stem = safe_download_stem(t, fallback=f"table_{tid}")
-            name = f"{stem}.xlsx"
-            if name in used_names:
-                name = f"{stem}_{tid}.xlsx"
-            used_names.add(name)
-            zf.writestr(name, table_to_excel_bytes(t))
-    zip_stem = safe_download_stem({"title": pathlib.Path(str(job_name)).stem}, fallback=job_id)
-    return buf.getvalue(), f"{zip_stem}_tables.zip"
 
 
 @router.get("/api/pdf/jobs/{job_id}/tables/download-zip")
@@ -495,7 +450,7 @@ async def pdf_download_tables_zip(job_id: str, user_email: str = Depends(require
     if not tables:
         raise HTTPException(404, "No tables to download")
 
-    payload, filename = _pdf_tables_zip_bytes(tables, job_name, job_id)
+    payload, filename = tables_to_zip_bytes(tables, job_name, job_id)
     return Response(
         content=payload,
         media_type="application/zip",
@@ -533,7 +488,7 @@ async def pdf_download_tables_zip_selected(
     if not tables:
         raise HTTPException(404, "No matching tables to download")
 
-    payload, filename = _pdf_tables_zip_bytes(tables, job_name, job_id)
+    payload, filename = tables_to_zip_bytes(tables, job_name, job_id)
     return Response(
         content=payload,
         media_type="application/zip",
@@ -580,30 +535,7 @@ async def pdf_persist_approved(
         # Overlay client Preview state (titles etc.) onto job tables + reviews.
         client_tables = body.get("tables")
         if isinstance(client_tables, list) and client_tables:
-            by_id = {
-                str(t.get("table_id")): t
-                for t in client_tables
-                if isinstance(t, dict) and t.get("table_id")
-            }
-            overlay_keys = (
-                "title",
-                "rows",
-                "columns",
-                "classification",
-                "human_review_needed",
-                "human_review_reason",
-                "semantic_status",
-            )
-            reviews = dict(job.get("reviews") or {})
-            for t in tables:
-                tid = str(t.get("table_id") or "")
-                override = by_id.get(tid)
-                if not override:
-                    continue
-                patch = {k: override[k] for k in overlay_keys if k in override}
-                t.update(patch)
-                reviews[tid] = {**reviews.get(tid, {}), **patch}
-            job["reviews"] = reviews
+            tables = apply_overlay_to_job_reviews(job, client_tables, tables=tables)
             _save_pdf_job(job)
 
     with session_scope() as session:

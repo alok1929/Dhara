@@ -622,3 +622,52 @@ Selection rules:
 - Never invent ids. Every id must appear in the catalog.
 - Match on title, page, summary, or obvious patterns (appendix, blank, chart, duplicate, topic).
 """
+
+
+# ── llm_preview: compact catalog for chat / guided handoff ──────────────────
+
+LLM_PREVIEW_SUMMARIZE_PROMPT = """You help a data steward review extracted tables.
+
+Given this list of tables (JSON). Each has table_id, title, page, and optional
+existing summary fields. Produce a compact catalog for chat mode.
+
+Tables:
+{tables_json}
+
+For EVERY table_id in the input, return one entry with:
+- table_id: exact id from the input (never invent)
+- name: short readable title (prefer title / banner; else "Page N table")
+- summary: one concise sentence (≤240 chars) describing what the table holds
+
+Return only the structured object with a tables array. Do not omit any table_id.
+"""
+
+
+LLM_PREVIEW_INTENT_PROMPT = """You interpret a data steward's natural-language request over a Preview table catalog.
+
+Optional steward context / system prompt:
+{prompt}
+
+User request:
+{user_request}
+
+Catalog (use ONLY these table_id values as table_names):
+{catalog_json}
+
+Choose exactly one action type:
+- find: locate / show matching tables (one or few)
+- bulk_find: locate many tables at once
+- delete: identify tables to remove (do NOT actually delete)
+- bulk_delete: identify many tables to remove
+- download: prepare one or few tables for download
+- bulk_download: prepare many tables for download
+- find_review_needed: tables that need human review (prefer empty table_names to mean "all")
+- find_ai_review_needed: tables flagged by AI repair / uncertain title
+
+Rules:
+- Prefer precision for find/delete/download; use bulk_* when the request clearly covers many.
+- When unsure between find and delete, choose find.
+- Never invent table_ids. Only ids from the catalog.
+- For find_review_needed / find_ai_review_needed, table_names may be empty (scope = all) or a subset.
+- Always include a short rationale.
+"""

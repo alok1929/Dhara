@@ -252,6 +252,15 @@ def save_working_job(
     existing.source_type = job.get("source_type") or existing.source_type or "pdf"
     if org_id is not None:
         existing.organisation_id = existing.organisation_id or org_id
+    raw_step = job.get("pipeline_step")
+    if raw_step is not None:
+        try:
+            step = int(raw_step)
+            # Never move backwards — same rule as set_pipeline_step.
+            prev = int(existing.pipeline_step) if existing.pipeline_step is not None else 0
+            existing.pipeline_step = max(prev, step)
+        except (TypeError, ValueError):
+            pass
     if existing.created_at_epoch is None:
         existing.created_at_epoch = created_epoch
     if pdf_bytes is not None or clear_pdf_bytes:
