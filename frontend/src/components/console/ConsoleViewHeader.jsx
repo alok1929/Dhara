@@ -14,6 +14,7 @@ export default function ConsoleViewHeader({
   setExpandedStage,
   goToStep,
   isStepReachable,
+  chatDisabled = false,
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -28,7 +29,7 @@ export default function ConsoleViewHeader({
           isStepReachable={isStepReachable}
         />
       </div>
-      <ConsoleViewModeSwitch mode={uiMode} onChange={onUiModeChange} />
+      <ConsoleViewModeSwitch mode={uiMode} onChange={onUiModeChange} chatDisabled={chatDisabled} />
     </div>
   )
 }

@@ -15,6 +15,8 @@ export interface PdfReviewProps {
   compact?: boolean
   previewAiFilter?: PreviewAiFindFilter | null
   onPreviewAiFilterChange?: (filter: PreviewAiFindFilter | null) => void
+  /** When set (chat Open), expand that table and scroll it into view. */
+  focusTableId?: string | null
   onContinueToGrouping?: ((
     jobId: string,
     persistResponse?: { grouping?: Record<string, unknown>; filename?: string },

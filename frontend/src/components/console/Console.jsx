@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useConsolePipeline } from './useConsolePipeline'
 import { useApp } from '../../context/AppContext'
 import { loadConsoleUiMode, saveConsoleUiMode, UI_MODES } from '../../lib/consoleUiMode'
+import { isChatModeAllowedForStep } from '../../lib/chatStages'
 import ConsoleGuidedView from './ConsoleGuidedView'
 import ChatConsole from './chat/ChatConsole'
 import Toast from '../ui/Toast'
@@ -12,7 +13,7 @@ export default function Console({ hasKey, onGoSettings, onGoDashboard, onGoCatal
   const { keySaved } = useApp()
   const hasLlmKey = hasKey || keySaved
   const pipeline = useConsolePipeline()
-  const { setStep, syncGuidedPreviewStep } = pipeline
+  const { setStep, syncGuidedPreviewStep, step } = pipeline
 
   const [uiMode, setUiMode] = useState(() => loadConsoleUiMode())
   const [modeToast, setModeToast] = useState(null)
@@ -25,8 +26,19 @@ export default function Console({ hasKey, onGoSettings, onGoDashboard, onGoCatal
     return () => clearTimeout(timer)
   }, [modeToast])
 
+  useEffect(() => {
+    if (isChatModeAllowedForStep(step) || uiMode !== UI_MODES.chat) return
+    saveConsoleUiMode(UI_MODES.guided)
+    setUiMode(UI_MODES.guided)
+    setModeToast('Chat is available through Grouping. Switched to Guided view.')
+  }, [step, uiMode])
+
   const onUiModeChange = useCallback((mode) => {
     if (mode === uiMode) return
+    if (mode === UI_MODES.chat && !isChatModeAllowedForStep(step)) {
+      setModeToast('Chat is available through Grouping only.')
+      return
+    }
     saveConsoleUiMode(mode)
     if (mode === UI_MODES.guided) {
       syncGuidedPreviewStep()

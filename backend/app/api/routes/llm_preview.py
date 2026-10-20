@@ -1,0 +1,467 @@
+"""llm_preview routes — chat interface on the same extraction job_id as guided Preview."""
+from __future__ import annotations
+
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+
+from app.api.dependencies import (
+    CurrentUser,
+    get_db,
+    require_user,
+    resolve_llm_credentials,
+)
+from app.services.llm_preview import (
+    build_llm_preview_catalog,
+    execute_action_plan,
+    plan_from_user_request,
+)
+from app.db.session import session_scope
+from app.db.repositories import pdf_jobs as pdf_store
+from app.services.llm_preview.grouping import (
+    ensure_persisted_tables,
+    groups_for_intent,
+    grouping_catalog_from_tables,
+    merge_groups_by_indices,
+    merge_proposed_group,
+    sync_soft_deletes_to_postgres,
+)
+from app.services.llm_preview.schemas import LlmInputResponse
+from app.services.preview.access import grouping_pipeline_step, preview_pipeline_step
+from app.services.preview import (
+    PreviewJobError,
+    append_llm_turn,
+    apply_overlay_to_job_reviews,
+    ensure_preview_pipeline_step,
+    get_llm_preview_catalog,
+    get_llm_preview_meta,
+    job_visible_to,
+    overlay_client_tables,
+    require_finished_job,
+    review_tables_for_job,
+    set_llm_preview_catalog,
+    soft_delete_tables,
+)
+from app.workers.extraction_jobs import (
+    _get_pdf_job,
+    _pdf_jobs_lock,
+    _save_pdf_job,
+)
+
+router = APIRouter(tags=["LLM Preview"])
+
+
+def _sync_deletes_to_postgres(job_id: str, table_ids: list[str]) -> None:
+    try:
+        with session_scope() as session:
+            sync_soft_deletes_to_postgres(session, job_id, table_ids)
+    except Exception:
+        pass
+
+
+def _require_api_key(request: Request, user: CurrentUser, db: Session) -> str:
+    api_key, _provider = resolve_llm_credentials(request, user.email, db=db)
+    if not (api_key or "").strip():
+        raise HTTPException(400, "Save an LLM API key in Settings before using llm_preview")
+    return api_key.strip()
+
+
+@router.post("/api/llm_preview/jobs/{job_id}/llm_preview_data")
+async def post_llm_preview_data(
+    job_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Store a compact catalog for chat mode on this extraction job.
+
+    Body:
+    - ``tables`` (optional): compact stubs overlay (title / summary fields only)
+    - ``force_summarize`` (optional bool): if true, run LangChain rewrite (needs API key)
+
+    Default path maps stubs → ``{table_id, name, summary}`` with **no LLM**.
+    Catalog is stored on ``job.reviews.__llm_preview``.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    force_summarize = bool(body.get("force_summarize"))
+    api_key = None
+    if force_summarize:
+        api_key = _require_api_key(request, user, db)
+
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        try:
+            job = require_finished_job(job, user=user)
+        except PreviewJobError as e:
+            raise HTTPException(e.status_code, e.message) from e
+        tables = review_tables_for_job(job)
+        overlay_client_tables(tables, body.get("tables"))
+
+    try:
+        if force_summarize:
+            catalog = await asyncio.to_thread(
+                build_llm_preview_catalog,
+                tables,
+                force_summarize=True,
+                api_key=api_key,
+            )
+        else:
+            catalog = build_llm_preview_catalog(tables, force_summarize=False)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, f"Could not build llm_preview catalog: {e}") from e
+
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        if not job_visible_to(job, user):
+            raise HTTPException(404, "Job not found")
+        ensure_preview_pipeline_step(job)
+        set_llm_preview_catalog(job, catalog, source_table_count=len(tables))
+        _save_pdf_job(job)
+        meta = get_llm_preview_meta(job)
+
+    return {
+        "job_id": job_id,
+        "tables": catalog,
+        "updated_at": meta.get("updated_at"),
+        "source_table_count": meta.get("source_table_count"),
+        "pipeline_step": meta.get("pipeline_step"),
+        "last_turns": meta.get("last_turns") or [],
+        "force_summarize": force_summarize,
+    }
+
+
+@router.get("/api/llm_preview/jobs/{job_id}/llm_preview_data")
+async def get_llm_preview_data(
+    job_id: str,
+    user: CurrentUser = Depends(require_user),
+):
+    """Return stored table names + summaries for this job (same job_id as guided)."""
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        try:
+            job = require_finished_job(job, user=user)
+        except PreviewJobError as e:
+            raise HTTPException(e.status_code, e.message) from e
+        meta = get_llm_preview_meta(job)
+        catalog = meta.get("catalog")
+
+    if catalog is None:
+        raise HTTPException(
+            404,
+            "llm_preview catalog not built yet — POST llm_preview_data or send a user_request to llm_input",
+        )
+
+    return {
+        "job_id": job_id,
+        "tables": catalog,
+        "updated_at": meta.get("updated_at"),
+        "source_table_count": meta.get("source_table_count"),
+        "pipeline_step": meta.get("pipeline_step"),
+        "last_turns": meta.get("last_turns") or [],
+    }
+
+
+async def _handle_llm_input(
+    job_id: str,
+    request: Request,
+    user: CurrentUser,
+    db: Session,
+):
+    """
+    Interpret ``user_request`` over the job catalog and return ``table_data``.
+
+    Body:
+    - user_request (required)
+    - prompt (optional steward context)
+    - tables (optional overlay — same shape as Preview / ai-search)
+    - persist_reviews (optional bool) — write overlay into job.reviews for guided handoff
+    - refresh (optional bool) — rebuild catalog from current tables (stubs, no LLM)
+    - force_summarize (optional bool) — with refresh, rewrite catalog via LangChain
+    - confirm_delete (optional bool) — for delete/bulk_delete, soft-delete via the same
+      ``deleted_table_ids`` path as guided Preview (POST /pdf/.../tables/delete)
+    - stage (optional str) — ``preview`` (default) or ``grouping`` for Grouping-step chat
+    - confirm_apply_group (optional bool) — apply ``propose_group`` / ``bulk_propose_group``
+      to Postgres grouping (same as guided Grouping UI)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    user_request = str(
+        body.get("user_request") or body.get("user_query") or ""
+    ).strip()
+    prompt = str(body.get("prompt") or "").strip() or None
+    persist_reviews = bool(body.get("persist_reviews"))
+    refresh = bool(body.get("refresh"))
+    force_summarize = bool(body.get("force_summarize"))
+    confirm_delete = bool(body.get("confirm_delete"))
+    confirm_apply_group = bool(body.get("confirm_apply_group"))
+    stage = str(body.get("stage") or "preview").strip().lower() or "preview"
+    if stage not in ("preview", "grouping"):
+        raise HTTPException(400, "stage must be 'preview' or 'grouping'")
+    client_tables = body.get("tables")
+    # Direct apply (chat Confirm) — skip LLM when name + table_ids are already known.
+    apply_group = body.get("apply_group") if isinstance(body.get("apply_group"), dict) else None
+
+    if apply_group and stage == "grouping":
+        gname = str(apply_group.get("group_name") or apply_group.get("name") or "").strip()
+        tids = [
+            str(t).strip()
+            for t in (apply_group.get("table_ids") or [])
+            if t is not None and str(t).strip()
+        ]
+        if not gname or not tids:
+            raise HTTPException(400, "apply_group requires group_name and table_ids")
+        with _pdf_jobs_lock:
+            job = _get_pdf_job(job_id)
+            try:
+                job = require_finished_job(job, user=user)
+            except PreviewJobError as e:
+                raise HTTPException(e.status_code, e.message) from e
+            filename = job.get("filename")
+            tables = review_tables_for_job(job)
+        with session_scope() as session:
+            ensure_persisted_tables(
+                session,
+                job_id=job_id,
+                user_email=user.email,
+                filename=filename,
+                tables=tables,
+            )
+            grouping = merge_proposed_group(
+                session,
+                job_id,
+                group_name=gname,
+                table_ids=tids,
+            )
+        return LlmInputResponse.model_validate(
+            {
+                "job_id": job_id,
+                "stage": stage,
+                "pipeline_step": grouping_pipeline_step(),
+                "type": "propose_group",
+                "group_name": gname,
+                "table_ids": tids,
+                "table_names": {tid: tid for tid in tids},
+                "rationale": f"Applied group “{gname}” ({len(tids)} table(s)).",
+                "executed": True,
+                "grouping": grouping,
+                "count": len(tids),
+            }
+        ).model_dump()
+
+    if not user_request:
+        raise HTTPException(400, "user_request (or user_query) is required")
+
+    api_key = _require_api_key(request, user, db)
+
+    filename = None
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        try:
+            job = require_finished_job(job, user=user)
+        except PreviewJobError as e:
+            raise HTTPException(e.status_code, e.message) from e
+        filename = job.get("filename")
+
+        tables = review_tables_for_job(job)
+        if persist_reviews and isinstance(client_tables, list) and client_tables:
+            tables = apply_overlay_to_job_reviews(job, client_tables, tables=tables)
+            _save_pdf_job(job)
+        else:
+            overlay_client_tables(tables, client_tables)
+
+        if stage == "grouping":
+            ensure_preview_pipeline_step(job)
+            job["pipeline_step"] = max(int(job.get("pipeline_step") or 0), grouping_pipeline_step())
+
+        catalog = get_llm_preview_catalog(job)
+        needs_catalog = refresh or catalog is None or stage == "grouping"
+
+    persisted_for_grouping: list[dict] | None = None
+    groups_context: list[dict] = []
+    if stage == "grouping":
+        with session_scope() as session:
+            persisted_for_grouping = ensure_persisted_tables(
+                session,
+                job_id=job_id,
+                user_email=user.email,
+                filename=filename,
+                tables=tables,
+            )
+            groups_context = groups_for_intent(pdf_store.load_grouping(session, job_id))
+        if persisted_for_grouping:
+            tables = persisted_for_grouping
+
+    if needs_catalog:
+        try:
+            if force_summarize:
+                catalog = await asyncio.to_thread(
+                    build_llm_preview_catalog,
+                    tables,
+                    force_summarize=True,
+                    api_key=api_key,
+                )
+            else:
+                catalog = (
+                    grouping_catalog_from_tables(tables)
+                    if stage == "grouping"
+                    else build_llm_preview_catalog(tables, force_summarize=False)
+                )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except Exception as e:
+            raise HTTPException(502, f"Could not build llm_preview catalog: {e}") from e
+
+        with _pdf_jobs_lock:
+            job = _get_pdf_job(job_id)
+            if not job_visible_to(job, user):
+                raise HTTPException(404, "Job not found")
+            set_llm_preview_catalog(job, catalog, source_table_count=len(tables))
+            _save_pdf_job(job)
+    else:
+        assert catalog is not None
+
+    try:
+        plan = await asyncio.to_thread(
+            plan_from_user_request,
+            user_request=user_request,
+            catalog=catalog,
+            api_key=api_key,
+            prompt=prompt,
+            stage=stage,
+            groups=groups_context if stage == "grouping" else None,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, f"Could not run llm_input: {e}") from e
+
+    # Re-load live tables after intent so concurrent deletes are reflected.
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        if not job_visible_to(job, user):
+            raise HTTPException(404, "Job not found")
+        if stage == "grouping" and persisted_for_grouping:
+            live_tables = list(persisted_for_grouping)
+        else:
+            live_tables = review_tables_for_job(job)
+        if not persist_reviews:
+            overlay_client_tables(live_tables, client_tables)
+
+    result = execute_action_plan(plan, live_tables)
+
+    action_type = str(result.get("type") or "")
+    if confirm_delete and action_type in ("delete", "bulk_delete"):
+        to_delete = list(result.get("table_ids") or [])
+        if to_delete:
+            with _pdf_jobs_lock:
+                job = _get_pdf_job(job_id)
+                if not job_visible_to(job, user):
+                    raise HTTPException(404, "Job not found")
+                soft_delete_tables(job, to_delete, save=_save_pdf_job)
+            _sync_deletes_to_postgres(job_id, to_delete)
+            result["executed"] = True
+            result["deleted"] = to_delete
+            result.pop("message", None)
+        else:
+            result["executed"] = False
+
+    if confirm_apply_group and action_type in ("propose_group", "bulk_propose_group"):
+        gname = str(result.get("group_name") or plan.group_name or "").strip()
+        tids = list(result.get("table_ids") or [])
+        if gname and tids:
+            with session_scope() as session:
+                grouping = merge_proposed_group(
+                    session,
+                    job_id,
+                    group_name=gname,
+                    table_ids=tids,
+                )
+            result["executed"] = True
+            result["grouping"] = grouping
+            result.pop("message", None)
+        else:
+            result["executed"] = False
+
+    # merge_groups: apply immediately (notebook-style — steward already named the groups)
+    if action_type == "merge_groups":
+        indices = [int(i) for i in (plan.group_indices or []) if i is not None]
+        gname = str(result.get("group_name") or plan.group_name or "").strip() or None
+        if len(indices) >= 2:
+            with session_scope() as session:
+                grouping = merge_groups_by_indices(
+                    session,
+                    job_id,
+                    group_indices=indices,
+                    group_name=gname,
+                )
+            result["executed"] = True
+            result["grouping"] = grouping
+            result["group_indices"] = indices
+            if gname:
+                result["group_name"] = gname
+            result.pop("message", None)
+            result["rationale"] = (
+                result.get("rationale")
+                or f"Merged groups {', '.join(str(i) for i in indices)}."
+            )
+        else:
+            result["executed"] = False
+            result["message"] = "Need at least two valid group numbers to merge."
+
+    with _pdf_jobs_lock:
+        job = _get_pdf_job(job_id)
+        if job_visible_to(job, user):
+            append_llm_turn(
+                job,
+                {
+                    "user_request": user_request,
+                    "type": result.get("type"),
+                    "table_ids": result.get("table_ids") or [],
+                    "rationale": result.get("rationale") or "",
+                    "executed": result.get("executed"),
+                },
+            )
+            _save_pdf_job(job)
+
+    pipeline_step = (
+        grouping_pipeline_step() if stage == "grouping" else preview_pipeline_step()
+    )
+    payload = {**result, "job_id": job_id, "stage": stage, "pipeline_step": pipeline_step}
+    return LlmInputResponse.model_validate(payload).model_dump()
+
+
+@router.post("/api/llm_preview/jobs/{job_id}/llm_input")
+async def post_llm_input(
+    job_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Interpret ``user_request`` (LangChain) and return structured Preview actions + ``table_data``."""
+    return await _handle_llm_input(job_id, request, user, db)
+
+
+@router.post("/api/llm_preview/jobs/{job_id}/chat")
+async def post_llm_chat(
+    job_id: str,
+    request: Request,
+    user: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Alias for ``llm_input`` — single chat entrypoint for steward queries."""
+    return await _handle_llm_input(job_id, request, user, db)

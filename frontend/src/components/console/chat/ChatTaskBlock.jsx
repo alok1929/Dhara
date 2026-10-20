@@ -5,7 +5,8 @@ import { Check, ChevronRight, Loader2 } from 'lucide-react'
 export default function ChatTaskBlock({ task, onToggleCollapsed, children }) {
   const running = task.status === 'running'
   const errored = task.status === 'error'
-  const expanded = !task.collapsed
+  /** Running tasks stay open (Cursor-style “thinking”) until they finish. */
+  const expanded = running || !task.collapsed
   const headerLabel = task.title
     || (running ? 'Working…' : 'Done')
 

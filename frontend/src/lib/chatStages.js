@@ -1,5 +1,12 @@
 /** Chat workflow pills — map to existing Console `step` numbers (1–7). */
 
+/** Chat is supported through Grouping + metadata (steps 1–4); later steps use Guided only. */
+export const CHAT_ENABLED_MAX_STEP = 4
+
+export function isChatModeAllowedForStep(step) {
+  return (Number(step) || 1) <= CHAT_ENABLED_MAX_STEP
+}
+
 export const CHAT_STAGE_PILLS = [
   { id: 'upload', label: 'Upload', steps: [1] },
   { id: 'preview', label: 'Preview', steps: [2] },

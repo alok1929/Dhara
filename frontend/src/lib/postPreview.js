@@ -230,6 +230,76 @@ export function createMatchGroup(matchResult, name, tableIds) {
   return { ...matchResult, groups, unmatched_tables: unmatchedKeep }
 }
 
+/**
+ * Merge two or more groups (0-based indices) into the earliest one.
+ * Tables from later groups move into the target; emptied groups are removed.
+ * @returns {{ matchResult, error?: string, targetIndex?: number, mergedNames?: string[], tableCount?: number }}
+ */
+export function mergeMatchGroups(matchResult, indices, { name } = {}) {
+  if (!matchResult?.groups?.length) {
+    return { matchResult, error: 'No groups available to merge.' }
+  }
+  const groupCount = matchResult.groups.length
+  const unique = [...new Set((indices || []).map((n) => Number(n)))]
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < groupCount)
+    .sort((a, b) => a - b)
+  if (unique.length < 2) {
+    return {
+      matchResult,
+      error: `Need at least two valid group numbers (1–${groupCount}).`,
+    }
+  }
+
+  const target = unique[0]
+  const sources = new Set(unique.slice(1))
+  const names = unique.map((i) => {
+    const g = matchResult.groups[i]
+    return g?.file_name || `Group ${i + 1}`
+  })
+  const pulled = []
+  let groups = matchResult.groups.map((g, i) => {
+    if (!sources.has(i)) {
+      return {
+        ...g,
+        matched_tables: [...(g.matched_tables || [])],
+      }
+    }
+    ;(g.matched_tables || []).forEach((mt) => {
+      pulled.push({
+        table: mt.table,
+        inventory_item: null,
+        confidence: 'manual',
+      })
+    })
+    return { ...g, matched_tables: [] }
+  })
+
+  const mergedName = (name && String(name).trim())
+    || names.filter(Boolean).join(' + ')
+    || groups[target]?.file_name
+    || `Group ${target + 1}`
+
+  groups[target] = {
+    ...groups[target],
+    file_name: mergedName,
+    matched_tables: [
+      ...(groups[target].matched_tables || []),
+      ...pulled,
+    ],
+  }
+
+  groups = groups
+    .filter((_, i) => !sources.has(i))
+    .map((g, i) => ({ ...g, workbook_index: i }))
+
+  return {
+    matchResult: { ...matchResult, groups },
+    targetIndex: target,
+    mergedNames: names,
+    tableCount: (groups[target]?.matched_tables || []).length,
+  }
+}
+
 export function startManualMatchGrouping(matchResult, allTables) {
   if (!matchResult) return matchResult
   return {

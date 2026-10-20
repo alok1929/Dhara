@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Button from '../../ui/Button'
 import ConsoleViewHeader from '../ConsoleViewHeader'
 import ConsoleWorkflowPanels from '../ConsoleWorkflowPanels'
-import ConsoleStatusPlaceholder from '../ConsoleStatusPlaceholder'
 import ProcessingStepper from '../ProcessingStepper'
 import PdfReview from '../../pdf/PdfReview'
 import ChatUploadScreen from './ChatUploadScreen'
@@ -22,6 +21,8 @@ import ChatInlinePdfGrouping from './ChatInlinePdfGrouping'
 import ChatStageArtifact from './ChatStageArtifact'
 import ChatTaskBlock from './ChatTaskBlock'
 import ChatRightPanel from './ChatRightPanel'
+import ChatFloatingProceed from './ChatFloatingProceed'
+import ChatTableResultBlock from './ChatTableResultBlock'
 import {
   clearLegacyChatMessages,
   loadChatActiveJob,
@@ -33,7 +34,7 @@ import {
   saveConsoleChatMessages,
 } from '../../../lib/consoleChatSession'
 import { saveConsoleUiMode, UI_MODES } from '../../../lib/consoleUiMode'
-import { stepForChatPillId } from '../../../lib/chatStages'
+import { isChatModeAllowedForStep, stepForChatPillId } from '../../../lib/chatStages'
 import { requestAppSidebarCollapse } from '../../../lib/appSidebar'
 import {
   catalogFromBatchTables,
@@ -44,6 +45,14 @@ import {
   previewStageSummary,
   downloadPdfJobTablesZip,
 } from '../../../lib/chatConsoleHelpers'
+import {
+  deletePdfJobTables,
+  filterReviewNeededTables,
+  isReviewNeededIntent,
+  rowsFromMatchedTables,
+} from '../../../lib/chatPreviewActions'
+import { postLlmInput } from '../../../lib/llmPreviewClient'
+import { pdfGroupingToMatchResult } from '../../../lib/postPreview'
 import {
   persistPdfApprovedAndLoadGrouping,
   PDF_GROUPING_PROGRESS_SUBTITLE,
@@ -77,44 +86,6 @@ function buildStatusTransitionSteps(steps, activeIdx) {
   }))
 }
 
-function ProposalCard({
-  count,
-  rationale,
-  tables,
-  selectedIds,
-  onToggle,
-  onExpand,
-  onConfirm,
-}) {
-  return (
-    <article className="rounded-2xl border border-line/90 bg-white p-4">
-      <div className="text-[15px] font-semibold text-ink">{count} table{count === 1 ? '' : 's'} identified</div>
-      <p className="mt-1.5 text-[13px] text-ink-soft">{rationale}</p>
-      <ul className="mt-3 max-h-40 space-y-1 overflow-y-auto text-[12.5px] text-ink">
-        {tables.slice(0, 8).map((t) => (
-          <li key={t._uid} className="truncate">
-            {t.title || t.id} · {t.filename || 'source'}
-          </li>
-        ))}
-        {tables.length > 8 && (
-          <li className="text-ink-soft">…and {tables.length - 8} more</li>
-        )}
-      </ul>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button variant="secondary" size="sm" onClick={onExpand}>
-          Expand to review
-        </Button>
-        <Button size="sm" onClick={onConfirm}>
-          Verify & proceed
-        </Button>
-      </div>
-      <div className="mt-2 text-[11px] text-ink-soft">
-        {selectedIds.size} of {tables.length} selected for exclusion
-      </div>
-    </article>
-  )
-}
-
 export default function ChatConsole({
   uiMode,
   onUiModeChange,
@@ -134,11 +105,13 @@ export default function ChatConsole({
   const [messagesReady, setMessagesReady] = useState(false)
   const [composerLoading, setComposerLoading] = useState(false)
   const [workspace, setWorkspace] = useState(null) // { stageId, mode?: 'proposal', proposalId? }
-  const [proposalSelection, setProposalSelection] = useState(() => new Set())
   const [activeJobId, setActiveJobId] = useState(() => loadChatActiveJob())
   /** Chat-owned AI find filter for the right-hand preview (PDF + batch). */
   const [previewAiFilter, setPreviewAiFilter] = useState(null)
+  const [previewFocusTableId, setPreviewFocusTableId] = useState(null)
   const [groupingPhase, setGroupingPhase] = useState('persist')
+  const [proceeding, setProceeding] = useState(false)
+  const [deletingMessageId, setDeletingMessageId] = useState(null)
   const anchorRefs = useRef({})
   const scrollRootRef = useRef(null)
   const pdfReviewRef = useRef(null)
@@ -166,6 +139,11 @@ export default function ChatConsole({
     startDatasetProcessing,
     stageIdx,
     statusPage,
+    setStatusPage,
+    setMetaLabel,
+    setMetadataId,
+    setMetadataIds,
+    setPendingGroups,
     step,
     step1MetadataFiles,
     unsavedAiFilled,
@@ -310,7 +288,7 @@ export default function ChatConsole({
       ensureStageAnchor('preview', () => ({
         title: 'Preview',
         subtitle: pdfReviewFilename || undefined,
-        summary: 'Extraction complete. Verify & proceed to continue, or Expand to inspect tables.',
+        summary: 'Your PDF has been uploaded and is in Preview.',
         bullets: [],
       }))
       return
@@ -319,7 +297,7 @@ export default function ChatConsole({
       const s = previewStageSummary(previewTables, savedIds)
       ensureStageAnchor('preview', () => ({
         title: 'Preview',
-        summary: `Extraction complete. I found ${s.total} table${s.total === 1 ? '' : 's'} across your documents.`,
+        summary: `Your files have been uploaded and are in Preview. I found ${s.total} table${s.total === 1 ? '' : 's'} across your documents.`,
         bullets: [
           `${s.ok} look good.`,
           s.needsFix ? `${s.needsFix} need review.` : null,
@@ -353,36 +331,6 @@ export default function ChatConsole({
     }
   }, [step, ensureStageAnchor])
 
-  useEffect(() => {
-    if (step === 5) {
-      ensureStageAnchor('classification', () => ({
-        title: 'Classification',
-        summary: 'Map columns to standard concepts and code lists.',
-        bullets: ['Review each group, then continue to harmonisation.'],
-      }))
-    }
-  }, [step, ensureStageAnchor])
-
-  useEffect(() => {
-    if (step === 6) {
-      ensureStageAnchor('harmonisation', () => ({
-        title: 'Harmonisation',
-        summary: 'Align values across related tables and confirm catalogue placement.',
-        bullets: [],
-      }))
-    }
-  }, [step, ensureStageAnchor])
-
-  useEffect(() => {
-    if (step === 7) {
-      ensureStageAnchor('publish', () => ({
-        title: 'Publish',
-        summary: 'Complete publication to register API and MCP endpoints for this release.',
-        bullets: [],
-      }))
-    }
-  }, [step, ensureStageAnchor])
-
   const goToStepGuarded = (targetStep) => {
     if (targetStep === 6) {
       requestHarmonisation()
@@ -392,9 +340,12 @@ export default function ChatConsole({
   }
 
   const openWorkspace = useCallback((stageId) => {
+    if (!isChatModeAllowedForStep(step)) return
+    const normalized = stageId === 'grouping-metadata' ? 'grouping' : stageId
+    if (!['preview', 'grouping'].includes(normalized)) return
     const targetStep = stageId === 'grouping-metadata' ? 4 : stepForChatPillId(stageId)
     if (targetStep !== step) setStep(targetStep)
-    setWorkspace({ stageId: stageId === 'grouping-metadata' ? 'grouping' : stageId })
+    setWorkspace({ stageId: normalized })
     requestAppSidebarCollapse()
   }, [setStep, step])
 
@@ -402,42 +353,83 @@ export default function ChatConsole({
     setWorkspace(null)
   }, [])
 
-  const runChatStatusTransition = useCallback(async (transitionKey, { title, onDone } = {}) => {
-    const cfg = STATUS_TRANSITIONS[transitionKey]
-    if (!cfg) {
-      onDone?.()
-      return
-    }
-    const taskKey = `transition-${transitionKey}-${Date.now()}`
+  const runChatStatusPage = useCallback(async (page, { title: titleOverride } = {}) => {
+    if (!page) return
+    const {
+      key,
+      title,
+      subtitle,
+      steps,
+      work,
+      after,
+      msPerStep = 850,
+    } = page
+    const taskKey = `transition-${key || 'status'}-${Date.now()}`
+    setWorkspace(null)
     upsertTask(taskKey, {
       taskVariant: 'status-transition',
-      title: title || cfg.title,
-      lines: [cfg.subtitle],
+      title: titleOverride || title || 'Working…',
+      lines: subtitle ? [subtitle] : [],
       status: 'running',
-      collapsed: true,
-      transitionSteps: cfg.steps,
+      collapsed: false,
+      transitionSteps: steps || [],
       transitionActiveIdx: 0,
     })
-    const stepCount = cfg.steps?.length || 1
+    const workPromise = work
+      ? Promise.resolve().then(() => work()).catch(() => {})
+      : Promise.resolve()
+    const stepCount = steps?.length || 1
     for (let i = 0; i < stepCount; i += 1) {
       upsertTask(taskKey, { transitionActiveIdx: i })
-      await sleep(cfg.msPerStep || 850)
+      await sleep(msPerStep)
     }
+    await workPromise
     upsertTask(taskKey, {
       status: 'done',
       collapsed: true,
       transitionActiveIdx: stepCount,
-      lines: [cfg.subtitle, 'Done.'],
+      lines: [...(subtitle ? [subtitle] : []), 'Done.'],
     })
-    onDone?.()
+    after?.()
   }, [upsertTask])
 
-  const applyChatPreviewFind = useCallback((tableIds, { rationale = '', prompt = '' } = {}) => {
-    const ids = [...new Set((tableIds || []).map((id) => String(id)).filter(Boolean))]
-    if (!ids.length) {
-      setPreviewAiFilter(null)
-    } else {
-      setPreviewAiFilter(createPreviewAiFindFilter({ tableIds: ids, rationale, prompt }))
+  const runChatStatusTransition = useCallback(async (transitionKey, opts = {}) => {
+    const cfg = STATUS_TRANSITIONS[transitionKey]
+    if (!cfg) {
+      opts.onDone?.()
+      return
+    }
+    await runChatStatusPage({ ...cfg, key: transitionKey, msPerStep: cfg.msPerStep || 850 }, opts)
+    opts.onDone?.()
+  }, [runChatStatusPage])
+
+  const consumingStatusPageRef = useRef(false)
+  useEffect(() => {
+    if (!statusPage || !isChatModeAllowedForStep(step)) return
+    if (consumingStatusPageRef.current) return
+    consumingStatusPageRef.current = true
+    const page = { ...statusPage }
+    setStatusPage(null)
+    void runChatStatusPage(page).finally(() => {
+      consumingStatusPageRef.current = false
+    })
+  }, [statusPage, step, setStatusPage, runChatStatusPage])
+
+  const openPreviewTable = useCallback((tableId, { tableIds = null, rationale = '', prompt = '' } = {}) => {
+    const focusId = tableId != null ? String(tableId) : null
+    setPreviewFocusTableId(focusId)
+    if (tableIds?.length) {
+      setPreviewAiFilter(createPreviewAiFindFilter({
+        tableIds: tableIds.map(String),
+        rationale,
+        prompt,
+      }))
+    } else if (focusId) {
+      setPreviewAiFilter(createPreviewAiFindFilter({
+        tableIds: [focusId],
+        rationale,
+        prompt,
+      }))
     }
     openWorkspace('preview')
   }, [openWorkspace])
@@ -447,6 +439,7 @@ export default function ChatConsole({
     setActiveJobId(null)
     setPdfReviewJob(jobId, filename || null)
     setPreviewAiFilter(null)
+    setPreviewFocusTableId(null)
     linkConsoleChatSessionId({ pdfJobId: jobId }).catch(() => {})
     setWorkspace(null)
     setMaxStepReached((m) => Math.max(m, 2))
@@ -458,7 +451,7 @@ export default function ChatConsole({
           status: 'done',
           collapsed: true,
           title: filename ? `Extracted tables from ${filename}` : 'Extraction complete',
-          lines: ['Files uploaded and processed.', 'Verify & proceed to continue, or Expand to inspect tables.'],
+          lines: ['Files uploaded and processed.', 'Expand and preview to inspect tables, or Save and proceed.'],
           jobId: null,
         }
         : m
@@ -466,7 +459,7 @@ export default function ChatConsole({
     ensureStageAnchor('preview', () => ({
       title: 'Preview',
       subtitle: filename || undefined,
-      summary: 'Extraction complete. Verify & proceed to continue, or Expand to inspect tables.',
+      summary: 'Your PDF has been uploaded and is in Preview.',
       bullets: [],
     }))
   }, [ensureStageAnchor, setMaxStepReached, setPdfReviewJob, setStep])
@@ -531,7 +524,7 @@ export default function ChatConsole({
         status: 'done',
         collapsed: true,
         title: 'Workbooks extracted',
-        lines: ['Matched and loaded. Verify & proceed to continue, or Expand to inspect.'],
+        lines: ['Matched and loaded. Expand and preview to inspect, or Save and proceed.'],
         jobId: null,
       })
       setWorkspace(null)
@@ -555,79 +548,87 @@ export default function ChatConsole({
   }
 
   const verifyPreview = async () => {
-    if (pdfReviewJobId) {
-      const jobId = pdfReviewJobId
-      const filename = pdfReviewFilename || 'pdf'
-      const taskKey = `pdf-grouping-${jobId}`
-      // Capture edits from open inspect panel before closing it.
-      const tablesFromPanel = workspace?.stageId === 'preview'
-        ? pdfReviewRef.current?.getTablesForPersist?.()
-        : null
+    if (proceeding) return
+    setProceeding(true)
+    setPreviewFocusTableId(null)
+    try {
+      if (pdfReviewJobId) {
+        const jobId = pdfReviewJobId
+        const filename = pdfReviewFilename || 'pdf'
+        const taskKey = `pdf-grouping-${jobId}`
+        // Capture edits from open inspect panel before closing it.
+        const tablesFromPanel = workspace?.stageId === 'preview'
+          ? pdfReviewRef.current?.getTablesForPersist?.()
+          : null
+
+        setWorkspace(null)
+        setGroupingPhase('persist')
+        upsertTask(taskKey, {
+          taskVariant: 'pdf-grouping',
+          title: filename,
+          filename,
+          lines: [PDF_GROUPING_PROGRESS_SUBTITLE],
+          status: 'running',
+          collapsed: false,
+          phase: 'persist',
+        })
+
+        try {
+          let tables = tablesFromPanel
+          if (!tables?.length) {
+            tables = await fetchPdfJobResultTables(jobId).catch(() => undefined)
+          }
+          const { matchResult: nextMatch, persistData } = await persistPdfApprovedAndLoadGrouping(jobId, {
+            tables,
+            sourceFile: filename,
+            onPhase: (phase) => {
+              setGroupingPhase(phase)
+              upsertTask(taskKey, { phase })
+            },
+          })
+          if (persistData?.grouping) {
+            await continueFromPdfPreview(jobId, persistData)
+          } else if (nextMatch) {
+            setMatchResult(nextMatch)
+            setPdfReviewJob(null, null)
+            setMaxStepReached((m) => Math.max(m, 3))
+            setStep(3)
+          } else {
+            throw new Error('Could not load grouping after preview')
+          }
+          upsertTask(taskKey, {
+            status: 'done',
+            collapsed: true,
+            phase: 'done',
+            lines: [PDF_GROUPING_PROGRESS_SUBTITLE, 'Grouping ready — Verify & proceed or Expand to review groups.'],
+          })
+        } catch (e) {
+          upsertTask(taskKey, {
+            status: 'error',
+            collapsed: false,
+            lines: [e.message || 'Could not continue to grouping.'],
+          })
+          appendMessage({ kind: 'assistant', text: e.message || 'Could not continue to grouping.' })
+        }
+        return
+      }
+
+      if (unsavedMismatched.length || unsavedAiFilled.length) {
+        appendMessage({
+          kind: 'assistant',
+          text: `Please Expand and preview and save corrections for ${unsavedMismatched.length + unsavedAiFilled.length} table(s) before continuing.`,
+        })
+        return
+      }
 
       setWorkspace(null)
-      setGroupingPhase('persist')
-      upsertTask(taskKey, {
-        taskVariant: 'pdf-grouping',
-        title: filename,
-        filename,
-        lines: [PDF_GROUPING_PROGRESS_SUBTITLE],
-        status: 'running',
-        collapsed: true,
-        phase: 'persist',
+      await runChatStatusTransition('previewToGrouping', {
+        title: 'Preparing grouping',
+        onDone: () => applyReconcile({}, { skipStatusPage: true }),
       })
-
-      try {
-        let tables = tablesFromPanel
-        if (!tables?.length) {
-          tables = await fetchPdfJobResultTables(jobId).catch(() => undefined)
-        }
-        const { matchResult: nextMatch, persistData } = await persistPdfApprovedAndLoadGrouping(jobId, {
-          tables,
-          sourceFile: filename,
-          onPhase: (phase) => {
-            setGroupingPhase(phase)
-            upsertTask(taskKey, { phase })
-          },
-        })
-        if (persistData?.grouping) {
-          await continueFromPdfPreview(jobId, persistData)
-        } else if (nextMatch) {
-          setMatchResult(nextMatch)
-          setPdfReviewJob(null, null)
-          setMaxStepReached((m) => Math.max(m, 3))
-          setStep(3)
-        } else {
-          throw new Error('Could not load grouping after preview')
-        }
-        upsertTask(taskKey, {
-          status: 'done',
-          collapsed: true,
-          phase: 'done',
-          lines: [PDF_GROUPING_PROGRESS_SUBTITLE, 'Grouping ready — Verify & proceed or Expand to review groups.'],
-        })
-      } catch (e) {
-        upsertTask(taskKey, {
-          status: 'error',
-          collapsed: false,
-          lines: [e.message || 'Could not continue to grouping.'],
-        })
-        appendMessage({ kind: 'assistant', text: e.message || 'Could not continue to grouping.' })
-      }
-      return
+    } finally {
+      setProceeding(false)
     }
-
-    if (unsavedMismatched.length || unsavedAiFilled.length) {
-      appendMessage({
-        kind: 'assistant',
-        text: `Please Expand preview and save corrections for ${unsavedMismatched.length + unsavedAiFilled.length} table(s) before continuing.`,
-      })
-      return
-    }
-
-    await runChatStatusTransition('previewToGrouping', {
-      title: 'Preparing grouping',
-      onDone: () => applyReconcile({}, { skipStatusPage: true }),
-    })
   }
 
   const verifyGrouping = () => {
@@ -635,29 +636,29 @@ export default function ChatConsole({
     requestContinueToMetadata()
   }
 
-  const verifyClassification = () => {
-    if (!classificationComplete) {
-      appendMessage({
-        kind: 'assistant',
-        text: 'Expand classification to finish mapping columns, then Verify & proceed again.',
-      })
-      return
-    }
+  const verifyMetadataAndOpenClassify = async () => {
     setWorkspace(null)
-    requestHarmonisation()
-  }
-
-  const verifyHarmonisation = () => {
-    setWorkspace(null)
-    publishFromClassify()
+    setMetaLabel('this release')
+    setMetadataIds([])
+    setMetadataId(null)
+    setPendingGroups(null)
+    await runChatStatusPage({
+      ...STATUS_TRANSITIONS.metadataToClassify,
+      key: 'metadataToClassify',
+      msPerStep: 550,
+      after: () => {
+        setMaxStepReached((m) => Math.max(m, 5))
+        setStep(5)
+        saveConsoleUiMode(UI_MODES.guided)
+        onUiModeChange(UI_MODES.guided)
+      },
+    })
   }
 
   const handleVerifyForStage = (stageId) => {
     if (stageId === 'preview') verifyPreview()
     else if (stageId === 'grouping') verifyGrouping()
-    else if (stageId === 'grouping-metadata') requestContinueToMetadata()
-    else if (stageId === 'classification') verifyClassification()
-    else if (stageId === 'harmonisation') verifyHarmonisation()
+    else if (stageId === 'grouping-metadata') verifyMetadataAndOpenClassify()
   }
 
   const resolvePreviewCatalog = async () => {
@@ -675,6 +676,102 @@ export default function ChatConsole({
     return { catalog: [], tables: [], jobId: null }
   }
 
+  const resolveChatJobId = useCallback(() => (
+    pdfReviewJobId || matchResult?.pdf_job_id || activeJobId || null
+  ), [pdfReviewJobId, matchResult?.pdf_job_id, activeJobId])
+
+  const applyLlmInputResponse = useCallback(async (data, { jobId } = {}) => {
+    const type = String(data?.type || '')
+    const rationale = String(data?.rationale || data?.message || '').trim() || 'Done.'
+    const ids = (data?.table_ids || []).map(String).filter(Boolean)
+    const nameMap = data?.table_names && typeof data.table_names === 'object'
+      ? data.table_names
+      : {}
+
+    appendMessage({ kind: 'assistant', text: rationale })
+
+    if (type === 'merge_groups') {
+      if (data.executed && data.grouping) {
+        const next = pdfGroupingToMatchResult(
+          data.grouping,
+          pdfReviewFilename || matchResult?.groups?.[0]?.matched_tables?.[0]?.table?.source_file || 'pdf',
+          jobId || data.job_id || matchResult?.pdf_job_id || null,
+        )
+        setMatchResult(next)
+        openWorkspace('grouping')
+      }
+      return
+    }
+
+    if ((type === 'propose_group' || type === 'bulk_propose_group') && ids.length) {
+      const rows = ids.map((id) => ({
+        id,
+        title: nameMap[id] || id,
+        page: null,
+        reason: null,
+      }))
+      appendMessage({
+        kind: 'tableResults',
+        variant: 'group',
+        rationale: data.group_name
+          ? `Proposed group “${data.group_name}”. Confirm to apply.`
+          : 'Proposed group. Confirm to apply.',
+        tableIds: ids,
+        rows,
+        groupName: data.group_name || '',
+        confirmed: false,
+      })
+      return
+    }
+
+    if (!ids.length) return
+
+    let sourceTables = []
+    try {
+      sourceTables = await fetchPdfJobResultTables(jobId || data.job_id).catch(() => [])
+    } catch {
+      sourceTables = []
+    }
+    const rows = rowsFromMatchedTables(sourceTables, ids, { pdfJob: true })
+    const displayRows = rows.length
+      ? rows
+      : ids.map((id) => ({
+        id,
+        title: nameMap[id] || id,
+        page: null,
+        reason: null,
+      }))
+
+    if (type === 'delete' || type === 'bulk_delete') {
+      appendMessage({
+        kind: 'tableResults',
+        variant: 'delete',
+        rationale: 'Confirm to permanently remove these tables from the preview.',
+        tableIds: ids,
+        rows: displayRows,
+        confirmed: false,
+      })
+      return
+    }
+
+    if (
+      type === 'find'
+      || type === 'bulk_find'
+      || type === 'find_review_needed'
+      || type === 'find_ai_review_needed'
+      || type === 'download'
+      || type === 'bulk_download'
+    ) {
+      appendMessage({
+        kind: 'tableResults',
+        variant: type.includes('review') ? 'review' : 'find',
+        rationale: 'Open a row to inspect it in Preview.',
+        tableIds: ids,
+        rows: displayRows,
+      })
+    }
+  }, [appendMessage, matchResult, openWorkspace, pdfReviewFilename, setMatchResult])
+
   const handleUserMessage = async (text) => {
     const conversation = buildPreviewChatConversation(messages)
     appendMessage({ kind: 'user', text })
@@ -685,7 +782,23 @@ export default function ChatConsole({
 
     setComposerLoading(true)
     try {
-      const { catalog, tables, jobId } = await resolvePreviewCatalog()
+      const jobId = resolveChatJobId()
+      // PDF jobs: notebook-style backend llm_input (Preview + Grouping).
+      if (jobId && (step === 2 || step === 3 || step === 4)) {
+        const stage = step >= 3 ? 'grouping' : 'preview'
+        const data = await postLlmInput(jobId, {
+          userRequest: text,
+          stage,
+          prompt: conversation.map((t) => `${t.role}: ${t.content}`).join('\n').slice(-2000) || null,
+        })
+        await applyLlmInputResponse(data, { jobId })
+        return
+      }
+
+      const { catalog, tables, resolvedJobId } = await (async () => {
+        const resolved = await resolvePreviewCatalog()
+        return { ...resolved, resolvedJobId: resolved.jobId }
+      })()
       if (!catalog.length) {
         appendMessage({
           kind: 'assistant',
@@ -696,54 +809,86 @@ export default function ChatConsole({
         return
       }
 
-      let data = jobId
-        ? await runPdfJobTableAiChat(jobId, text, catalog, { conversation })
+      const pdfJob = Boolean(resolvedJobId)
+
+      if (isReviewNeededIntent(text)) {
+        const reviewRows = filterReviewNeededTables(tables, { pdfJob })
+        appendMessage({
+          kind: 'assistant',
+          text: reviewRows.length
+            ? `Found ${reviewRows.length} table${reviewRows.length === 1 ? '' : 's'} that need review.`
+            : 'No tables currently need human review.',
+        })
+        if (reviewRows.length) {
+          appendMessage({
+            kind: 'tableResults',
+            variant: 'review',
+            rationale: 'Open a row to inspect it in Preview.',
+            tableIds: reviewRows.map((r) => r.id),
+            rows: reviewRows,
+          })
+        }
+        return
+      }
+
+      let data = resolvedJobId
+        ? await runPdfJobTableAiChat(resolvedJobId, text, catalog, { conversation })
         : await runConsoleTableAiChat(text, catalog, { conversation })
 
       let action = data.action === 'remove' ? 'remove' : data.action === 'find' ? 'find' : 'none'
       let findIds = (data.table_ids || []).map(String).filter(Boolean)
+      const userWantsRemove = /\b(remove|delete|drop|discard|exclude|get rid of|take out)\b/i.test(text)
+      const parseFailed = /could not interpret that response/i.test(String(data.reply || ''))
 
-      const needsSearchFallback = action !== 'remove' && (
-        (action === 'find' && !findIds.length)
-        || (action === 'none' && isPreviewShowFindIntent(text))
+      const needsSearchFallback = (
+        (action === 'remove' && !findIds.length)
+        || (action === 'find' && !findIds.length)
+        || (action === 'none' && (isPreviewShowFindIntent(text) || userWantsRemove || parseFailed))
       )
       if (needsSearchFallback) {
-        const searchRows = catalogRowsForAiSearch(tables, { pdfJob: Boolean(jobId) })
+        const searchRows = catalogRowsForAiSearch(tables, { pdfJob })
         const searchPrompt = [text, ...conversation.map((t) => t.content)].join('\n\n')
-        const searchResult = jobId
-          ? await runPdfJobTableAiSearch(jobId, searchPrompt, searchRows)
+        const searchResult = resolvedJobId
+          ? await runPdfJobTableAiSearch(resolvedJobId, searchPrompt, searchRows)
           : await runConsoleTableAiSearch(searchPrompt, searchRows)
-        if (searchResult.intent !== 'remove' && searchResult.table_ids?.length) {
-          action = 'find'
+        if (searchResult.table_ids?.length) {
+          const asRemove = userWantsRemove && (
+            searchResult.intent === 'remove' || action === 'remove' || parseFailed
+          )
+          action = asRemove ? 'remove' : 'find'
           findIds = searchResult.table_ids.map(String)
           data = {
             ...data,
-            reply: searchResult.rationale || data.reply || `Showing ${findIds.length} table(s) in the preview.`,
+            reply: asRemove
+              ? (searchResult.rationale
+                || `Found ${findIds.length} table(s) to remove. Confirm in chat to delete them.`)
+              : (searchResult.rationale || data.reply || `Found ${findIds.length} matching table(s).`),
           }
         }
       }
 
       appendMessage({ kind: 'assistant', text: data.reply || 'Done.' })
 
-      const idSet = new Set(findIds)
-      const batchTables = previewTables.length ? previewTables : []
-      const matched = batchTables.length
-        ? batchTables.filter((t) => idSet.has(String(t._uid)))
-        : tables.filter((t) => idSet.has(String(t.table_id)))
+      const sourceTables = previewTables.length && !pdfJob ? previewTables : tables
+      const rows = rowsFromMatchedTables(sourceTables, findIds, { pdfJob })
 
-      if (action === 'remove' && matched.length) {
-        const proposalId = newId()
-        const uids = matched.map((t) => t._uid || t.table_id)
-        setProposalSelection(new Set(uids))
+      if (action === 'remove' && rows.length) {
         appendMessage({
-          kind: 'proposal',
-          proposalId,
-          rationale: 'Review this selection before excluding tables from grouping.',
-          tables: matched.map((t) => (t._uid ? t : { ...t, _uid: t.table_id })),
-          intent: 'remove',
+          kind: 'tableResults',
+          variant: 'delete',
+          rationale: 'Confirm to permanently remove these tables from the preview.',
+          tableIds: rows.map((r) => r.id),
+          rows,
+          confirmed: false,
         })
-      } else if (action === 'find') {
-        applyChatPreviewFind(findIds, { rationale: data.reply || '', prompt: text })
+      } else if (action === 'find' && rows.length) {
+        appendMessage({
+          kind: 'tableResults',
+          variant: 'find',
+          rationale: 'Open a row to inspect it in Preview.',
+          tableIds: rows.map((r) => r.id),
+          rows,
+        })
       }
     } catch (e) {
       appendMessage({ kind: 'assistant', text: e.message || 'Could not interpret that request.' })
@@ -752,45 +897,110 @@ export default function ChatConsole({
     }
   }
 
-  const confirmProposal = (msg) => {
-    const ids = [...proposalSelection]
-    if (!ids.length) {
-      appendMessage({ kind: 'assistant', text: 'Select at least one table to exclude.' })
+  const confirmGroupProposal = async (msg) => {
+    const jobId = resolveChatJobId()
+    const ids = (msg.tableIds || msg.rows?.map((r) => r.id) || []).map(String).filter(Boolean)
+    if (!jobId || !ids.length) {
+      appendMessage({ kind: 'assistant', text: 'Could not apply group — missing job or tables.' })
       return
     }
-    const next = excludeTablesFromMatchResult(matchResult, ids)
-    setMatchResult(next)
-    appendMessage({
-      kind: 'assistant',
-      text: `Excluded ${ids.length} table${ids.length === 1 ? '' : 's'} from this release. Grouping totals have been updated.`,
-    })
-    setWorkspace(null)
+    setDeletingMessageId(msg.id)
+    try {
+      const data = await postLlmInput(jobId, {
+        stage: 'grouping',
+        applyGroup: {
+          group_name: msg.groupName || 'Untitled group',
+          table_ids: ids,
+        },
+      })
+      if (!data.executed || !data.grouping) {
+        throw new Error(data.message || 'Could not apply group')
+      }
+      setMatchResult(pdfGroupingToMatchResult(
+        data.grouping,
+        pdfReviewFilename || 'pdf',
+        jobId,
+      ))
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, confirmed: true } : m)))
+      appendMessage({ kind: 'assistant', text: data.rationale || 'Group applied.' })
+      openWorkspace('grouping')
+    } catch (e) {
+      appendMessage({ kind: 'assistant', text: e.message || 'Could not apply group.' })
+    } finally {
+      setDeletingMessageId(null)
+    }
   }
 
-  // statusPage is suppressed in chat for transitions we handle inline (preview→grouping).
-  const chatOwnsTransition = statusPage?.key === 'previewToGrouping'
+  const confirmTableDelete = async (msg) => {
+    const ids = (msg.tableIds || msg.rows?.map((r) => r.id) || []).map(String).filter(Boolean)
+    if (!ids.length) {
+      appendMessage({ kind: 'assistant', text: 'No tables selected to delete.' })
+      return
+    }
+    setDeletingMessageId(msg.id)
+    try {
+      const jobId = pdfReviewJobId || resolveChatJobId()
+      if (jobId) {
+        await deletePdfJobTables(jobId, ids)
+        // Refresh right-panel filter if open; PdfReview will refetch on remount / user can reopen.
+        setPreviewAiFilter((prev) => {
+          if (!isPreviewAiFindActive(prev)) return prev
+          const nextIds = prev.tableIds.filter((id) => !ids.includes(String(id)))
+          return nextIds.length
+            ? createPreviewAiFindFilter({ ...prev, tableIds: nextIds })
+            : null
+        })
+        if (previewFocusTableId && ids.includes(String(previewFocusTableId))) {
+          setPreviewFocusTableId(null)
+        }
+        // Force PdfReview to remount with fresh data if panel is open.
+        if (workspace?.stageId === 'preview') {
+          setWorkspace({ stageId: 'preview', refreshKey: Date.now() })
+        }
+      } else if (matchResult) {
+        const next = excludeTablesFromMatchResult(matchResult, ids)
+        setMatchResult(next)
+      } else {
+        throw new Error('Nothing to delete — open Preview after extraction first.')
+      }
+      setMessages((prev) => prev.map((m) => (
+        m.id === msg.id ? { ...m, confirmed: true } : m
+      )))
+      appendMessage({
+        kind: 'assistant',
+        text: `Deleted ${ids.length} table${ids.length === 1 ? '' : 's'} from this preview.`,
+      })
+    } catch (e) {
+      appendMessage({ kind: 'assistant', text: e.message || 'Could not delete tables.' })
+    } finally {
+      setDeletingMessageId(null)
+    }
+  }
+
   const showUpload = step === 1 && !previewTables.length && !statusPage && !activeJobId && !pdfReviewJobId
   const showChat = !showUpload
 
   const isPdfRelease = Boolean(pdfReviewJobId || matchResult?.pdf_job_id)
   // Inspect path only: workspace is set explicitly via Expand / find filter.
   const rightPanelStageId = workspace?.stageId || null
-  const showRightPanel = showChat && Boolean(rightPanelStageId) && !chatOwnsTransition
+  const showRightPanel = showChat
+    && Boolean(rightPanelStageId)
+    && isChatModeAllowedForStep(step)
+    && ['preview', 'grouping'].includes(rightPanelStageId)
 
   const workspaceTitle = {
     preview: 'Preview',
     grouping: step === 4 ? 'Metadata' : 'Grouping',
-    classification: 'Classification',
-    harmonisation: 'Harmonisation',
-    publish: 'Publish',
   }[rightPanelStageId] || 'Workspace'
 
   const previewAiFindTableIds = isPreviewAiFindActive(previewAiFilter)
     ? previewAiFilter.tableIds
     : null
 
-  const showComposer = showChat && (!statusPage || chatOwnsTransition)
+  const showComposer = showChat && isChatModeAllowedForStep(step)
   const messagesScrollHeight = showComposer ? CHAT_MESSAGES_SCROLL_HEIGHT : CHAT_SPLIT_HEIGHT
+  const previewReady = step === 2 && Boolean(pdfReviewJobId || previewTables.length)
+  const showFloatingProceed = previewReady && !proceeding
 
   return (
     <div className="console-chat-screen flex flex-col gap-5 overflow-hidden">
@@ -803,6 +1013,7 @@ export default function ChatConsole({
         expandedStage={expandedStage}
         setExpandedStage={setExpandedStage}
         goToStep={goToStepGuarded}
+        chatDisabled={!isChatModeAllowedForStep(step)}
         isStepReachable={(s) => {
           if (s === 6) return classificationComplete
           return s <= maxStepReached
@@ -815,14 +1026,14 @@ export default function ChatConsole({
       >
         <div
           ref={scrollRootRef}
-          className={`flex min-h-0 min-w-0 flex-col ${showRightPanel ? 'flex-none' : 'flex-1'}`}
+          className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden ${showRightPanel ? 'flex-none' : 'flex-1'}`}
           style={{
             height: CHAT_SPLIT_HEIGHT,
             maxHeight: CHAT_SPLIT_HEIGHT,
             width: showRightPanel ? CHAT_SPLIT_CHAT_WIDTH : undefined,
           }}
         >
-          <ChatScrollRegion height={messagesScrollHeight} className="px-2">
+          <ChatScrollRegion height={messagesScrollHeight} className="min-h-0 px-2">
             {showUpload && (
               <ChatUploadScreen
                 hasLlmKey={hasLlmKey}
@@ -840,21 +1051,7 @@ export default function ChatConsole({
               />
             )}
 
-            {statusPage && !chatOwnsTransition && (
-              <div className="rounded-2xl border border-line/90 bg-white p-5">
-                <ConsoleStatusPlaceholder
-                  key={statusPage.key}
-                  title={statusPage.title}
-                  subtitle={statusPage.subtitle}
-                  steps={statusPage.steps}
-                  work={statusPage.work || null}
-                  msPerStep={statusPage.msPerStep || 850}
-                  onComplete={statusPage.after}
-                />
-              </div>
-            )}
-
-            {showChat && (!statusPage || chatOwnsTransition) && (
+            {showChat && (
               <div className="mx-auto flex max-w-3xl flex-col gap-4 py-2">
                 {messages.map((m) => {
                   if (m.kind === 'task') {
@@ -913,7 +1110,8 @@ export default function ChatConsole({
                   if (m.kind === 'stage') {
                     const sid = m.stageId
                     const pdfJobId = matchResult?.pdf_job_id || pdfReviewJobId
-                    const downloadExtra = sid === 'preview' && pdfJobId ? (
+                    const isPreviewStage = sid === 'preview'
+                    const downloadExtra = isPreviewStage && pdfJobId ? (
                       <div className="mt-3">
                         <Button
                           variant="secondary"
@@ -929,7 +1127,6 @@ export default function ChatConsole({
                       </div>
                     ) : null
                     const expandStageId = sid.replace('-metadata', '')
-                    const expandLabel = sid === 'preview' ? 'Expand' : 'Expand'
                     return (
                       <div
                         key={m.id}
@@ -938,41 +1135,67 @@ export default function ChatConsole({
                       >
                         <ChatStageArtifact
                           title={m.title}
-                          subtitle={m.subtitle || (sid === 'preview' ? pdfReviewFilename : undefined)}
+                          subtitle={m.subtitle || (isPreviewStage ? pdfReviewFilename : undefined)}
                           summary={m.summary}
                           bullets={m.bullets}
                           extra={downloadExtra}
-                          expandLabel={expandLabel}
+                          expandLabel={isPreviewStage ? 'Expand and preview' : 'Expand'}
                           onExpand={
                             sid !== 'publish' && workspace?.stageId !== expandStageId
                               ? () => openWorkspace(expandStageId)
                               : undefined
                           }
-                          onVerify={sid !== 'publish' ? () => handleVerifyForStage(sid) : undefined}
-                          verifyDisabled={sid === 'grouping' && metadataFilling}
+                          onSaveAndProceed={
+                            isPreviewStage
+                              ? () => handleVerifyForStage('preview')
+                              : undefined
+                          }
+                          saveAndProceedDisabled={proceeding || Boolean(activeJobId)}
+                          onVerify={
+                            !isPreviewStage && ['grouping', 'grouping-metadata'].includes(sid)
+                              ? () => handleVerifyForStage(sid)
+                              : undefined
+                          }
+                          verifyDisabled={
+                            (sid === 'grouping' && metadataFilling)
+                            || (sid === 'grouping-metadata' && step !== 4)
+                          }
                         />
                       </div>
                     )
                   }
-                  if (m.kind === 'proposal') {
+                  if (m.kind === 'tableResults') {
                     return (
                       <div key={m.id}>
-                        <ProposalCard
-                          count={m.tables.length}
+                        <ChatTableResultBlock
+                          variant={m.variant || 'find'}
                           rationale={m.rationale}
-                          tables={m.tables}
-                          selectedIds={proposalSelection}
-                          onExpand={() => {
-                            setProposalSelection(new Set(m.tables.map((t) => t._uid)))
-                            openWorkspace('preview')
-                            setWorkspace({
-                              stageId: 'preview',
-                              mode: 'proposal',
-                              proposalId: m.proposalId,
+                          rows={m.rows || []}
+                          confirmed={Boolean(m.confirmed)}
+                          confirming={deletingMessageId === m.id}
+                          groupName={m.groupName}
+                          onOpen={(row) => {
+                            openPreviewTable(row.id, {
+                              tableIds: m.tableIds || [row.id],
+                              rationale: m.rationale || '',
+                              prompt: '',
                             })
-                            requestAppSidebarCollapse()
                           }}
-                          onConfirm={() => confirmProposal(m)}
+                          onExpand={() => {
+                            const ids = (m.tableIds || m.rows?.map((r) => r.id) || []).map(String)
+                            if (!ids.length) return
+                            if (step >= 3) {
+                              openWorkspace('grouping')
+                              return
+                            }
+                            openPreviewTable(ids[0], {
+                              tableIds: ids,
+                              rationale: m.rationale || '',
+                              prompt: '',
+                            })
+                          }}
+                          onConfirmDelete={() => confirmTableDelete(m)}
+                          onConfirmGroup={() => confirmGroupProposal(m)}
                         />
                       </div>
                     )
@@ -983,9 +1206,17 @@ export default function ChatConsole({
             )}
           </ChatScrollRegion>
 
+          {showFloatingProceed && (
+            <ChatFloatingProceed
+              onClick={() => handleVerifyForStage('preview')}
+              disabled={composerLoading || Boolean(activeJobId)}
+              loading={proceeding}
+            />
+          )}
+
           {showComposer && (
             <div
-              className="flex flex-none items-center px-2 pt-2"
+              className="flex shrink-0 flex-none items-center px-2 pt-2"
               style={{ height: CHAT_COMPOSER_HEIGHT, minHeight: CHAT_COMPOSER_HEIGHT }}
             >
               <ChatComposer
@@ -1011,12 +1242,10 @@ export default function ChatConsole({
                 rightPanelStageId === 'preview' && pdfReviewJobId ? 'px-2 py-2' : 'p-3 sm:p-4'
               }
               onClose={closeWorkspace}
-              onVerify={() => handleVerifyForStage(
-                rightPanelStageId === 'grouping' && step === 4 ? 'grouping-metadata' : rightPanelStageId,
-              )}
             >
               {rightPanelStageId === 'preview' && pdfReviewJobId ? (
                 <PdfReview
+                  key={workspace?.refreshKey || pdfReviewJobId}
                   ref={pdfReviewRef}
                   embedded
                   compact
@@ -1025,9 +1254,11 @@ export default function ChatConsole({
                   filename={pdfReviewFilename}
                   previewAiFilter={previewAiFilter}
                   onPreviewAiFilterChange={setPreviewAiFilter}
+                  focusTableId={previewFocusTableId}
                   onDone={() => {
                     setPdfReviewJob(null, null)
                     setPreviewAiFilter(null)
+                    setPreviewFocusTableId(null)
                     setWorkspace(null)
                   }}
                   onContinueProgressStart={(id) => {
@@ -1041,7 +1272,7 @@ export default function ChatConsole({
                       filename,
                       lines: [PDF_GROUPING_PROGRESS_SUBTITLE],
                       status: 'running',
-                      collapsed: true,
+                      collapsed: false,
                       phase: 'persist',
                     })
                     setTimeout(() => {
@@ -1083,6 +1314,7 @@ export default function ChatConsole({
               ) : rightPanelStageId === 'preview' && previewTables.length > 0 && !isPdfRelease && step === 2 && !pdfReviewJobId ? (
                 <ConsoleWorkflowPanels
                   layout="workspace"
+                  suppressStatusPage
                   forcePreview
                   previewAiFindTableIds={previewAiFindTableIds}
                   onClearPreviewAiFind={() => setPreviewAiFilter(null)}
@@ -1105,6 +1337,7 @@ export default function ChatConsole({
               ) : (
                 <ConsoleWorkflowPanels
                   layout="workspace"
+                  suppressStatusPage
                   hasLlmKey={hasLlmKey}
                   hasKey={hasKey}
                   onGoSettings={onGoSettings}

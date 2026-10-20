@@ -438,6 +438,7 @@ Selection rules:
 - If nothing matches, return "table_ids": [] and a brief rationale.
 - Never invent ids. Every id must appear in the catalog.
 - Match on title, page, summary, or obvious patterns (appendix, blank, chart, duplicate, topic).
+- Keep "rationale" to one short sentence. Put every matching id in "table_ids" — do not truncate the list.
 """
 
 TABLE_PREVIEW_CHAT_PROMPT = """You are Dhara, helping a data steward review extracted statistical tables.
@@ -452,7 +453,7 @@ Answer using titles, pages, and summaries in the catalog. If the question needs 
 
 Return ONLY valid JSON (no markdown):
 {{
-  "reply": "2-5 sentences answering the steward in plain language",
+  "reply": "1-2 short sentences",
   "action": "none",
   "table_ids": []
 }}
@@ -464,6 +465,85 @@ Action rules:
   - follow-ups that refer to tables you or they mentioned earlier in the conversation (use conversation context).
 - When action is "find", you MUST set "table_ids" to every catalog table that matches (precision over recall). The preview panel will filter to these ids automatically.
 - "remove" ONLY when they clearly ask to remove, delete, drop, or exclude tables from the release.
-- When action is "remove", set "table_ids" to matching ids.
+- When action is "remove", set "table_ids" to every matching id (do not truncate). Keep "reply" to one short sentence — put the selection in "table_ids", not in prose.
 - When action is "none", use "table_ids": [].
 """
+
+
+# ── llm_preview: compact catalog for chat / guided handoff ──────────────────
+
+LLM_PREVIEW_SUMMARIZE_PROMPT = """You help a data steward review extracted tables.
+
+Given this list of tables (JSON). Each has table_id, title, page, and optional
+existing summary fields. Produce a compact catalog for chat mode.
+
+Tables:
+{tables_json}
+
+For EVERY table_id in the input, return one entry with:
+- table_id: exact id from the input (never invent)
+- name: short readable title (prefer title / banner; else "Page N table")
+- summary: one concise sentence (≤240 chars) describing what the table holds
+
+Return only the structured object with a tables array. Do not omit any table_id.
+"""
+
+
+LLM_PREVIEW_INTENT_SYSTEM_PROMPT = """You are a precise table-selection agent for a government statistics Preview catalog.
+
+You receive:
+1) A steward's natural-language request.
+2) A catalog of extracted tables. Each entry has:
+   - table_id: stable id (ALWAYS use this in table_names — never invent ids)
+   - name: display title
+   - summary: short description (often repeats the title)
+
+Your job: choose an action type and the matching table_id values.
+
+Action types:
+- find — locate / show a small number of matching tables
+- bulk_find — many matches (prefer when the request clearly covers a whole topic with several tables)
+- delete / bulk_delete — identify tables to remove (selection only; do not invent deletes)
+- download / bulk_download — prepare matching tables for download
+- find_review_needed / find_ai_review_needed — only when the steward asks about review / AI flags
+
+Matching rules (accuracy over recall):
+- Match on name and summary: topic words, crop names, synonyms, and clear phrases
+  (e.g. "condiment and spices" ↔ "CONDIMENT AND SPICE", "spice crops").
+- Include a table ONLY if it clearly belongs to the request. Prefer precision.
+- If several consecutive tables share the same topic title (multi-page series),
+  include ALL of them that match — use bulk_find when there are 3+.
+- Never invent table_ids. Every id MUST appear in the catalog.
+- If nothing matches, return type=find and table_names=[].
+- When unsure between find and delete, choose find.
+
+Output ONLY the structured fields: type, table_names, rationale, group_name, group_indices."""
+
+LLM_GROUPING_INTENT_EXTRA = """
+
+Grouping stage — you ALSO receive a Groups list (group_number is 1-based, as shown in the UI):
+
+- merge_groups — steward asks to merge/combine/join existing groups
+  (e.g. "merge group 6 and group 7", "combine groups 3 and 4").
+  Set group_indices to those 1-based group_number values (at least two).
+  Optionally set group_name for the merged title; otherwise names are joined.
+  Also set table_names to EVERY table_id that belongs to those groups.
+- propose_group — one or two matching tables to put in a new/edited group
+- bulk_propose_group — three or more matching tables for one group
+- Always set group_name to a short descriptive bundle title when proposing.
+- If the steward only asks to find/show/download/delete (no grouping language),
+  use find/bulk_find/delete/download as usual.
+- Never invent table_ids or group_numbers that are not in the Groups list.
+"""
+
+LLM_PREVIEW_INTENT_HUMAN_PROMPT = """Optional steward context:
+{prompt}
+
+Steward request:
+{user_request}
+
+Catalog JSON (use ONLY these table_id values):
+{catalog_json}
+
+Current groups (Grouping stage; empty when Preview):
+{groups_json}"""

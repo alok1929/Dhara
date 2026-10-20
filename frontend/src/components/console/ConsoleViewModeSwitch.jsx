@@ -4,7 +4,7 @@ import { LayoutList, MessageSquare } from 'lucide-react'
 import Tooltip from '../ui/Tooltip'
 import { UI_MODES } from '../../lib/consoleUiMode'
 
-export default function ConsoleViewModeSwitch({ mode, onChange }) {
+export default function ConsoleViewModeSwitch({ mode, onChange, chatDisabled = false }) {
   const tabClass = (active) =>
     `inline-flex items-center justify-center rounded-lg p-2 transition-colors duration-dhara ease-dhara ${
       active
@@ -30,14 +30,17 @@ export default function ConsoleViewModeSwitch({ mode, onChange }) {
           <LayoutList className="h-4 w-4" strokeWidth={2} aria-hidden />
         </button>
       </Tooltip>
-      <Tooltip label="Chat view">
+      <Tooltip label={chatDisabled ? 'Chat is available through Grouping only' : 'Chat view'}>
         <button
           type="button"
           role="tab"
           aria-selected={mode === UI_MODES.chat}
           aria-label="Chat view"
-          className={tabClass(mode === UI_MODES.chat)}
-          onClick={() => onChange(UI_MODES.chat)}
+          disabled={chatDisabled}
+          className={`${tabClass(mode === UI_MODES.chat)} ${chatDisabled ? 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-ink-soft' : ''}`}
+          onClick={() => {
+            if (!chatDisabled) onChange(UI_MODES.chat)
+          }}
         >
           <MessageSquare className="h-4 w-4" strokeWidth={2} aria-hidden />
         </button>

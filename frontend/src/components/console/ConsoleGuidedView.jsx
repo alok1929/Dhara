@@ -6,6 +6,7 @@ import ConsoleWorkflowPanels from './ConsoleWorkflowPanels'
 import { withinStageBack } from './ConsoleStages'
 import ClassifyBreadcrumb from './classify/ClassifyBreadcrumb'
 import ConsoleViewHeader from './ConsoleViewHeader'
+import { isChatModeAllowedForStep } from '../../lib/chatStages'
 import PdfReview from '../pdf/PdfReview'
 
 export default function ConsoleGuidedView({
@@ -61,6 +62,7 @@ export default function ConsoleGuidedView({
         expandedStage={expandedStage}
         setExpandedStage={setExpandedStage}
         goToStep={goToStepGuarded}
+        chatDisabled={!isChatModeAllowedForStep(step)}
         isStepReachable={(s) => {
           if (s === 6) return classificationComplete
           return s <= maxStepReached

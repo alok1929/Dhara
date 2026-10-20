@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any, Dict, List
 
+from app.services.extraction.pdf.llm_json import loads_llm_json
 from app.services.llm_prompts import OPENAI_MODEL, TABLE_AI_SEARCH_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -88,22 +89,18 @@ def suggest_tables_from_prompt(
         model=OPENAI_MODEL,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=2000,
+        max_tokens=8000,
         temperature=0,
     )
     raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw) if raw else {}
-    except json.JSONDecodeError:
+    data = loads_llm_json(raw) or {}
+    if not data:
         logger.warning("suggest_search: non-JSON LLM response: %s", raw[:300])
         return {
             "intent": "find",
             "table_ids": [],
             "rationale": "Could not parse the model response.",
         }
-
-    if not isinstance(data, dict):
-        data = {}
 
     intent_raw = str(data.get("intent") or "").strip().lower()
     # Prefer find unless the steward clearly asked to remove AND the model

@@ -1,7 +1,7 @@
 """Console chat sessions (UUID per upload workflow).
 
 Revision ID: 004_console_chat_sessions
-Revises: 003_pdf_table_snapshots
+Revises: 004_dataset_id_counters
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from alembic import op
 from sqlalchemy import text
 
 revision: str = "004_console_chat_sessions"
-down_revision: Union[str, None] = "003_pdf_table_snapshots"
+down_revision: Union[str, None] = "004_dataset_id_counters"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

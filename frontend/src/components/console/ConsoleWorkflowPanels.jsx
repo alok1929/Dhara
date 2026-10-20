@@ -30,6 +30,8 @@ export default function ConsoleWorkflowPanels({
   classificationComplete,
   setClassificationComplete,
   goToHarmRef,
+  /** Chat right panel: progress runs in the thread, not here. */
+  suppressStatusPage = false,
 }) {
   const {
     STATUS_TRANSITIONS,
@@ -112,7 +114,7 @@ export default function ConsoleWorkflowPanels({
 
   const inner = (
     <>
-      {statusPage && (
+      {statusPage && !suppressStatusPage && (
         <ConsoleStatusPlaceholder
           key={statusPage.key}
           title={statusPage.title}
@@ -123,7 +125,7 @@ export default function ConsoleWorkflowPanels({
           onComplete={statusPage.after}
         />
       )}
-      <div style={{ display: statusPage ? 'none' : undefined }}>
+      <div style={{ display: statusPage && !suppressStatusPage ? 'none' : undefined }}>
         {step === 1 && !inWorkspace && (
           <div className="flex flex-col gap-6">
             {!hasLlmKey && <LlmKeyRequiredBanner onGoSettings={onGoSettings} />}

@@ -133,6 +133,7 @@ const PdfReview = forwardRef(function PdfReview({
   compact = false,
   previewAiFilter = null,
   onPreviewAiFilterChange = null,
+  focusTableId = null,
   onContinueToGrouping = null,
   /** When true with embedded+onContinueToGrouping, skip local continuing chrome (chat owns progress). */
   deferContinueProgress = false,
@@ -166,6 +167,7 @@ const PdfReview = forwardRef(function PdfReview({
   const [downloadingZip, setDownloadingZip] = useState(false)
   const [downloadingId, setDownloadingId] = useState(null)
   const rootRef = useRef(null)
+  const tableRowRefs = useRef({})
   const router = useRouter()
   const previewFilterControlled = typeof onPreviewAiFilterChange === 'function'
 
@@ -175,6 +177,29 @@ const PdfReview = forwardRef(function PdfReview({
       setTableSearch(previewAiFilter.prompt)
     }
   }, [previewFilterControlled, previewAiFilter])
+
+  useEffect(() => {
+    const tid = focusTableId != null ? String(focusTableId) : ''
+    if (!tid || !tables?.length) return
+    const found = tables.some((t) => String(t.table_id) === tid)
+    if (!found) return
+    setExpanded(tid)
+    setStatusFilter('all')
+    setTableSearch('')
+    const TABLES_PER_PAGE_FOCUS = 25
+    let list = tables
+    if (previewFilterControlled && isPreviewAiFindActive(previewAiFilter)) {
+      const idSet = new Set(previewAiFilter.tableIds.map(String))
+      list = tables.filter((t) => idSet.has(String(t.table_id)))
+    }
+    const idx = list.findIndex((t) => String(t.table_id) === tid)
+    if (idx >= 0) setTablePage(Math.floor(idx / TABLES_PER_PAGE_FOCUS))
+    const timer = setTimeout(() => {
+      const el = tableRowRefs.current[tid]
+      el?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+    }, 120)
+    return () => clearTimeout(timer)
+  }, [focusTableId, tables, previewFilterControlled, previewAiFilter])
 
   const triggerBlobDownload = async (url, fallbackName, init = {}) => {
     const res = await fetch(url, withAuthHeaders(init))
@@ -1198,7 +1223,14 @@ const PdfReview = forwardRef(function PdfReview({
             const reviewed = reviewedIds.has(t.table_id)
             const selected = selectedIds.has(t.table_id)
             return (
-              <div key={t.table_id} className={`overflow-hidden rounded-lg border bg-surface transition-[border-color] duration-300 ease-out ${isOpen ? 'border-teal' : selectMode && selected ? 'border-teal/50' : 'border-line'}`}>
+              <div
+                key={t.table_id}
+                ref={(el) => {
+                  if (el) tableRowRefs.current[t.table_id] = el
+                  else delete tableRowRefs.current[t.table_id]
+                }}
+                className={`overflow-hidden rounded-lg border bg-surface transition-[border-color] duration-300 ease-out ${isOpen ? 'border-teal' : selectMode && selected ? 'border-teal/50' : 'border-line'}`}
+              >
                 <div className={`flex items-start gap-2 hover:bg-cream ${chatCompact ? 'px-2.5 py-2' : 'gap-2.5 px-3.5 py-2.5'}`}>
                   {selectMode && (
                     <input

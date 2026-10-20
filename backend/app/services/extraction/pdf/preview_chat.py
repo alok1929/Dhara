@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any, Dict, List
 
+from app.services.extraction.pdf.llm_json import loads_llm_json
 from app.services.extraction.pdf.suggest_search import _catalog_entry, _sanitize_ids
 from app.services.llm_prompts import OPENAI_MODEL, TABLE_PREVIEW_CHAT_PROMPT
 
@@ -91,29 +92,22 @@ def preview_chat_from_prompt(
         model=OPENAI_MODEL,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=2000,
+        # Large catalogs + many matching ids can truncate at 2k; keep headroom.
+        max_tokens=8000,
         temperature=0.2,
     )
     raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw) if raw else {}
-    except json.JSONDecodeError:
+    data = loads_llm_json(raw) or {}
+    if not data:
         logger.warning("preview_chat: non-JSON LLM response: %s", raw[:300])
-        return {
-            "reply": "I could not interpret that response. Try rephrasing your question.",
-            "action": "none",
-            "table_ids": [],
-        }
-
-    if not isinstance(data, dict):
-        data = {}
 
     reply = str(data.get("reply") or "").strip()
-    if not reply:
-        reply = "I do not have enough context to answer that from the table list alone."
-
     action_raw = str(data.get("action") or "none").strip().lower()
-    wants_remove = bool(_REMOVE_HINT.search(text)) and action_raw == "remove"
+    user_wants_remove = bool(_REMOVE_HINT.search(text))
+    # Treat as remove when the model agrees, or when JSON failed but the prompt
+    # clearly asked to delete (so we can fall through to suggest_search).
+    wants_remove = user_wants_remove and (action_raw == "remove" or not data)
+
     if wants_remove:
         action = "remove"
     elif action_raw == "find":
@@ -123,12 +117,15 @@ def preview_chat_from_prompt(
 
     selected = _sanitize_ids(data.get("table_ids"), valid_ids) if action != "none" else []
 
-    needs_find_fallback = (
-        action != "remove"
-        and (action != "find" or not selected)
-        and (_SHOW_FIND_HINT.search(text) or _is_show_follow_up(text))
+    needs_search_fallback = (
+        (action == "remove" and not selected)
+        or (
+            action != "remove"
+            and (action != "find" or not selected)
+            and (_SHOW_FIND_HINT.search(text) or _is_show_follow_up(text))
+        )
     )
-    if needs_find_fallback:
+    if needs_search_fallback:
         from app.services.extraction.pdf.suggest_search import suggest_tables_from_prompt
 
         combined = _combined_search_prompt(text, conversation)
@@ -141,7 +138,23 @@ def preview_chat_from_prompt(
         except ValueError:
             search_result = {}
         search_ids = _sanitize_ids(search_result.get("table_ids"), valid_ids)
-        if search_ids and search_result.get("intent") != "remove":
+        search_intent = str(search_result.get("intent") or "find").strip().lower()
+        if search_ids and user_wants_remove and (
+            wants_remove or search_intent == "remove"
+        ):
+            remove_reply = reply
+            if not remove_reply or not data:
+                remove_reply = str(search_result.get("rationale") or "").strip()
+            if not remove_reply:
+                remove_reply = (
+                    f"Found {len(search_ids)} table(s) to remove. Confirm in chat to delete them."
+                )
+            return {
+                "reply": remove_reply,
+                "action": "remove",
+                "table_ids": search_ids,
+            }
+        if search_ids and search_intent != "remove" and not wants_remove:
             find_reply = reply
             if not find_reply or _generic_non_find_reply(find_reply):
                 find_reply = str(search_result.get("rationale") or "").strip()
@@ -152,6 +165,23 @@ def preview_chat_from_prompt(
                 "action": "find",
                 "table_ids": search_ids,
             }
+
+    if not data and not selected:
+        return {
+            "reply": "I could not interpret that response. Try rephrasing your question.",
+            "action": "none",
+            "table_ids": [],
+        }
+
+    if not reply:
+        if action == "remove" and selected:
+            reply = (
+                f"Found {len(selected)} table(s) to remove. Confirm in chat to delete them."
+            )
+        elif action == "find" and selected:
+            reply = f"Found {len(selected)} matching table(s)."
+        else:
+            reply = "I do not have enough context to answer that from the table list alone."
 
     return {
         "reply": reply,
