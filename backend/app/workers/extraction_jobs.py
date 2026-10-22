@@ -197,6 +197,9 @@ def _run_extraction_job(
 
     ``api_key`` is a legacy fallback when the job has no ``user_email``; the
     worker prefers the decrypted key from Postgres for the job owner.
+    Chat still follows ``app.services.llm`` precedence: if this process has
+    ``DHARA_LLM_BASE_URL`` and ``DHARA_LLM_MODEL``, those win over the user key.
+    A separate worker container must be given the same ``DHARA_LLM_*`` env.
     """
     last_flush = {"stage": None, "bucket": -1}
     resolved_key = _resolve_job_api_key(job_id, api_key)

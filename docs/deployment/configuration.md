@@ -34,20 +34,26 @@ Admin provisioning: `backend/scripts/create_user.py`.
 
 ## LLM & embeddings
 
-Paste a **MEITY-empanelled LLM** key in **Settings**. All AI paths (Excel
-metadata fill, NCO matching, PDF extraction/grouping/validation) use that
-key via the `X-Llm-Api-Key` header. Server `OPENAI_API_KEY` /
-`ANTHROPIC_API_KEY` are **not** used as fallbacks.
+Stewards paste a cloud key in **Settings**. That key is not a fallback for
+on-prem chat when the variables below are set. Server `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY` are **not** used as extraction fallbacks.
 
 | Variable | Purpose |
 |----------|---------|
+| `DHARA_LLM_PROVIDER` | `mock` skips real chat (tests). Wins over everything else |
+| `DHARA_LLM_BASE_URL` | Gateway origin, e.g. `http://model-gateway:8100` (factory adds `/v1`) |
+| `DHARA_LLM_MODEL` | Catalogue id, e.g. `gemma-3-4b` (must match vLLM `--served-model-name`) |
+| `DHARA_LLM_API_KEY` | Optional bearer for the gateway. Defaults to `local` |
 | `EMBEDDING_DIM` | Vector width (default 1536 for common small embedding models) |
 | `EMBEDDING_MODEL` | Override embedding model if supported by code paths |
 
-**Without a Settings key:** Uploads and the pipeline still work using
-heuristics. AI-assisted steps (richer PDF extraction, metadata auto-fill,
-NCO matching, LLM grouping) degrade or are skipped. There is no server
-env-key fallback.
+On-prem chat needs **both** `DHARA_LLM_BASE_URL` and `DHARA_LLM_MODEL`. See
+[model-server](./model-server.md). Embeddings still use the Settings OpenAI key
+or a pseudo-embedding. MEITY cloud keys stay in Settings; they do not imply
+this gateway.
+
+**Without a Settings key and without on-prem env:** uploads still work using
+heuristics. AI-assisted steps degrade or are skipped.
 
 ## Object storage
 

@@ -51,8 +51,11 @@ def run_post_extraction_validation(
 
     validated_by_page: Dict[int, Dict[str, Any]] = dict(high_results)
     if llm_pages:
+        from app.services.llm.factory import live_openai_chat
+
         key = (api_key or "").strip() or None
-        if key:
+        # On-prem env is enough; a Settings key is not required for vLLM chat.
+        if live_openai_chat(key):
             llm_results = validate_all_pages_batched(
                 llm_pages,
                 page_text,

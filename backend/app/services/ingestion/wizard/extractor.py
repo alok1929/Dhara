@@ -159,6 +159,18 @@ def _call_with_retry(call, max_retries: int = 3):
             time.sleep(wait)
 
 
+def _embed_client_for(llm, api_key: Optional[str]):
+    """Embeddings stay on api.openai.com. vLLM chat does not serve them."""
+    key = (api_key or "").strip()
+    if not key or key.startswith("mock") or key.startswith("sk-ant-"):
+        return None
+    if llm.is_on_prem:
+        return openai.OpenAI(api_key=key)
+    if llm.provider == "openai":
+        return llm.openai_sdk()
+    return None
+
+
 def _extract_json_with_key(text: str, required_key: str) -> Optional[Dict]:
     """Find the first valid JSON object in `text` that contains `required_key`."""
     # Strip markdown fences first
@@ -186,17 +198,37 @@ def _extract_json_with_key(text: str, required_key: str) -> Optional[Dict]:
 
 class TableExtractor:
     def __init__(self, api_key: Optional[str] = None, skip_llm: bool = False, provider: Optional[str] = None):
-        self.skip_llm = skip_llm
-        self.provider = provider or _detect_provider(api_key)
+        self.model = OPENAI_MODEL
+        self.llm = None
+        self.embed_client = None
         # Don't touch the SDK at all in skip_llm mode -- constructing it raises
         # if no API key is configured anywhere, which would otherwise make
         # SKIP_LLM=1 unusable without also having a (unused) key set.
         if skip_llm:
+            self.skip_llm = True
+            self.provider = provider or _detect_provider(api_key)
             self.client = None
-        elif self.provider == "openai":
-            self.client = openai.OpenAI(api_key=api_key)
+            return
+
+        from app.services.llm.factory import get_llm_for_request
+
+        llm = get_llm_for_request(api_key, provider)
+        if llm is None or llm.is_mock:
+            self.skip_llm = True
+            self.provider = "mock" if llm is not None else (provider or _detect_provider(api_key))
+            self.client = None
+            return
+
+        # On-prem forces OpenAI-compat (vLLM). Anthropic stays cloud-only.
+        self.skip_llm = False
+        self.llm = llm
+        self.provider = llm.provider
+        self.model = llm.model
+        if llm.provider == "openai":
+            self.client = llm.openai_sdk()
         else:
-            self.client = anthropic.Anthropic(api_key=api_key)
+            self.client = llm.anthropic_sdk()
+        self.embed_client = _embed_client_for(llm, api_key)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -711,17 +743,25 @@ class TableExtractor:
         this extractor was constructed for."""
         if self.provider == "openai":
             resp = _call_with_retry(lambda: self.client.chat.completions.create(
-                model=OPENAI_MODEL,
+                model=self.model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             ))
-            return resp.choices[0].message.content.strip()
+            text = self.llm.completion_text(resp.choices[0].message) if self.llm else (
+                resp.choices[0].message.content or ""
+            )
+            return text.strip()
         resp = _call_with_retry(lambda: self.client.messages.create(
-            model=ANTHROPIC_MODEL,
+            model=self.model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         ))
         return resp.content[0].text.strip()
+
+    def _loads_llm_json(self, text: str, *, context: str):
+        if self.llm is not None:
+            return self.llm.loads_json(text, context=context)
+        return json.loads(text)
 
     # ─────────────────────────────────────────────────────────────────────────
     # STRATEGY A — Direct LLM (single prompt → single response)
@@ -747,8 +787,7 @@ class TableExtractor:
         )
 
         text = self._complete(prompt, max_tokens=2048)
-        text = re.sub(r"```[a-z]*\n?", "", text).strip().rstrip("`").strip()
-        return json.loads(text)
+        return self._loads_llm_json(text, context="excel_structure")
 
     # ── LLM-based category metadata extraction ───────────────────────────────
 
@@ -845,7 +884,7 @@ class TableExtractor:
         text = re.sub(r"^```[a-z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
         try:
-            result = json.loads(text)
+            result = self._loads_llm_json(text, context="excel_catalogue")
         except json.JSONDecodeError:
             parsed = _extract_json_with_key(text, "short_description")
             result = parsed or {}

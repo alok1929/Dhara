@@ -67,6 +67,12 @@ def test_validate_requires_explicit_high_confidence():
 
 def test_merge_without_api_key_is_noop(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DHARA_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("DHARA_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("DHARA_LLM_MODEL", raising=False)
+    from app.core.config import clear_settings_cache
+
+    clear_settings_cache()
     groups = [
         _singleton_group("1", "LIVE BIRTHS BY BIRTH ORDER AND BIRTH WEIGHT"),
         _singleton_group(
@@ -95,7 +101,8 @@ def test_merge_maps_surrogate_ids_from_llm(monkeypatch):
         ]
 
     monkeypatch.setattr(
-        "app.services.grouping.pdf_grouping._call_singleton_merge_llm_batched", fake_batched
+        "app.services.grouping.singleton_merge._call_singleton_merge_llm_batched",
+        fake_batched,
     )
     multi = {
         "name": "Already grouped",
@@ -132,6 +139,12 @@ def test_merge_maps_surrogate_ids_from_llm(monkeypatch):
 
 def test_surrogate_id_remap_in_llm_response(monkeypatch):
     """Model returns t1/t2; caller must map back to real UUIDs."""
+    monkeypatch.delenv("DHARA_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("DHARA_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("DHARA_LLM_MODEL", raising=False)
+    from app.core.config import clear_settings_cache
+
+    clear_settings_cache()
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeResp:

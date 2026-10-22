@@ -1,0 +1,95 @@
+# Dhara on-prem chat: one FastAPI gateway, one vLLM OpenAI server.
+#
+# The llm folder is a Dockerfile (vllm/vllm-openai), not an application.
+# Switching checkpoints is LLM_MODEL=<folder> plus a rebuild of `llm`.
+# Dhara sets DHARA_LLM_BASE_URL=http://model-gateway:8100 and
+# DHARA_LLM_MODEL to the same catalogue id (SERVED_NAME).
+#
+#   cd deploy/model-server
+#   cp .env.example .env
+#   docker compose -f compose.llm-only.yml --profile llm up -d --build
+
+name: dhara-model-server
+
+x-gpu-llm: &gpu-llm
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["${LLM_GPU_DEVICE_IDS:-${GPU_DEVICE_IDS:-0}}"]
+            capabilities: [gpu]
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: dhara/model-gateway:latest
+    container_name: dhara-model-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8100}:8000"
+    environment:
+      LLM_UPSTREAM: ${LLM_UPSTREAM:-}
+      LLM_MODEL: ${LLM_MODEL:-phi-4-mini-instruct}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
+      LLM_EXTRA_UPSTREAMS: ${LLM_EXTRA_UPSTREAMS:-}
+    volumes:
+      - ./models.yaml:/app/app/models.yaml:ro
+    networks:
+      model_net:
+        aliases:
+          - model-gateway
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/v1/models',timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  llm:
+    profiles: ["llm"]
+    build:
+      context: ./llm/${LLM_MODEL:-phi-4-mini-instruct}
+    image: dhara/model-llm:${LLM_MODEL:-phi-4-mini-instruct}
+    container_name: dhara-model-llm
+    restart: unless-stopped
+    environment:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+      MAX_MODEL_LEN: ${VLLM_MAX_MODEL_LEN:-32768}
+      MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS:-8}
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-${HF_TOKEN:-}}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks: [model_net]
+    <<: *gpu-llm
+
+volumes:
+  hf_cache:
+
+networks:
+  model_net:
+    name: dhara_model_net
+    driver: bridge

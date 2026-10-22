@@ -96,8 +96,11 @@ def _extractor_for(
 ):
     from app.services.ingestion.wizard.extractor import TableExtractor
 
+    from app.services.llm.factory import chat_ready
+
     key, provider = resolve_llm_credentials(request, user_email, db=db)
-    return TableExtractor(api_key=key, skip_llm=not key, provider=provider)
+    # On-prem env counts as configured even when the user has no Settings key.
+    return TableExtractor(api_key=key, skip_llm=not chat_ready(key, provider), provider=provider)
 
 
 __all__ = [

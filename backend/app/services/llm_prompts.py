@@ -1,5 +1,9 @@
 """
 Central configuration: pipeline workers, LLM API limits, and prompt templates.
+
+Chat connections (base URL, catalogue model id, mock vs on-prem vs Settings)
+live in ``app.services.llm``. This module stays the prompt-text source;
+``app.services.llm.prompts`` re-exports it.
 """
 
 from __future__ import annotations

@@ -14,11 +14,11 @@ callers can inspect or compare them:
 * validate_table_fields_llm  -- asks an OpenAI model to judge the pair.
 """
 import json
-import os
+import logging
 import re
 from typing import Dict, List, Optional
 
-import openai
+logger = logging.getLogger(__name__)
 
 TABLE_MARKER_RE = re.compile(r"\bTABLE[\s:\-]", re.IGNORECASE)
 
@@ -73,8 +73,10 @@ def validate_table_fields_llm(
     table_id = (table_id or "").strip()
     title = (title or "").strip()
 
-    key = (api_key or "").strip()
-    if not key:
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
+    if llm is None:
         return {
             "valid": None,
             "issues": ["LLM validation skipped (no Settings API key)"],
@@ -82,7 +84,9 @@ def validate_table_fields_llm(
             "title": title,
         }
 
-    client = openai.OpenAI(api_key=key)
+    client = llm.openai_sdk()
+    if llm.is_on_prem:
+        model = llm.model
 
 # f"""You are validating two fields extracted from a statistical table sheet.
 
@@ -164,12 +168,16 @@ Respond with ONLY: {{"valid": true or false, "issues": ["...", ...]}}
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
     )
-    text = response.choices[0].message.content or "{}"
+    text = llm.completion_text(response.choices[0].message) or "{}"
 
     try:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         parsed = json.loads(match.group(0)) if match else {}
     except (json.JSONDecodeError, AttributeError):
+        logger.warning(
+            "llm json salvage profile=%s context=table_id_title_validate",
+            llm.profile_tag(),
+        )
         parsed = {}
 
     issues = parsed.get("issues", [])
@@ -281,9 +289,13 @@ def repair_table_id_title_llm(
     """
     table_id = (table_id or "").strip()
     title = (title or "").strip()
-    key = (api_key or "").strip()
-    if not key:
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
+    if llm is None:
         return None
+    if llm.is_on_prem:
+        model = llm.model
     lines = [str(x).strip() for x in (context_rows or []) if str(x).strip()]
     col_preview = ", ".join(str(c) for c in (columns or [])[:8] if str(c).strip())
 
@@ -310,16 +322,23 @@ Definitions:
 """
 
     try:
-        client = openai.OpenAI(api_key=key)
+        client = llm.openai_sdk()
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=280,
         )
-        text = response.choices[0].message.content or ""
+        text = llm.completion_text(response.choices[0].message)
         match = re.search(r"\{.*\}", text, re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
+        try:
+            parsed = json.loads(match.group(0)) if match else {}
+        except (json.JSONDecodeError, AttributeError):
+            logger.warning(
+                "llm json salvage profile=%s context=table_id_title_repair",
+                llm.profile_tag(),
+            )
+            parsed = {}
         out: Dict[str, str] = {}
 
         repaired_id = str(parsed.get("table_id") or "").strip()

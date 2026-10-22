@@ -94,7 +94,11 @@ def _call_singleton_merge_llm(
     api_key: str,
 ) -> list[dict[str, Any]]:
     """Ask the model for merges among singleton titles. Uses short surrogate ids."""
-    from openai import OpenAI
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
+    if llm is None:
+        return []
 
     # Short ids (t1, t2, …) — UUIDs / long catalogue ids are often mangled.
     alias_to_real: dict[str, str] = {}
@@ -149,16 +153,20 @@ Catalog:
 {json.dumps(catalog, ensure_ascii=False)}
 """
 
-    client = OpenAI(api_key=api_key)
+    client = llm.openai_sdk()
+    model = llm.model if llm.is_on_prem else GROUP_LLM_MODEL
     resp = client.chat.completions.create(
-        model=GROUP_LLM_MODEL,
+        model=model,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
         max_tokens=6000,
         temperature=0,
     )
-    text = (resp.choices[0].message.content or "").strip()
-    data = json.loads(text) if text else {}
+    text = llm.completion_text(resp.choices[0].message).strip()
+    try:
+        data = llm.loads_json(text, context="singleton_merge") if text else {}
+    except json.JSONDecodeError:
+        data = {}
     merges = data.get("merges") if isinstance(data, dict) else None
     if not isinstance(merges, list):
         return []
@@ -256,8 +264,11 @@ def merge_singleton_groups_strict(
     Returns (possibly updated groups, whether any merge was applied).
     On missing key / API failure / empty singletons, returns groups unchanged.
     """
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
     key = (api_key or "").strip()
-    if not key or not groups:
+    if llm is None or not groups:
         print(
             f"[pdf_grouping] singleton LLM skipped (key={'yes' if bool(key) else 'no'}, groups={len(groups or [])})",
             flush=True,

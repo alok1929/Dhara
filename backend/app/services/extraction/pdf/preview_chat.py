@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 from app.services.extraction.pdf.llm_json import loads_llm_json
 from app.services.extraction.pdf.suggest_search import _catalog_entry, _sanitize_ids
-from app.services.llm_prompts import OPENAI_MODEL, TABLE_PREVIEW_CHAT_PROMPT
+from app.services.llm_prompts import TABLE_PREVIEW_CHAT_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,10 @@ def preview_chat_from_prompt(
     text = (prompt or "").strip()
     if not text:
         raise ValueError("prompt is required")
-    if not (api_key or "").strip():
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
+    if llm is None:
         raise ValueError("An LLM API key is required in Settings")
 
     catalog = [_catalog_entry(t) for t in tables if t.get("table_id") is not None]
@@ -80,26 +83,33 @@ def preview_chat_from_prompt(
             "table_ids": [],
         }
 
-    from openai import OpenAI
-
     user_prompt = TABLE_PREVIEW_CHAT_PROMPT.format(
         conversation_block=_format_conversation_block(conversation),
         prompt=text,
         catalog_json=json.dumps(catalog, ensure_ascii=False),
     )
-    client = OpenAI(api_key=api_key.strip())
+    client = llm.openai_sdk()
     resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
+        model=llm.model,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": user_prompt}],
         # Large catalogs + many matching ids can truncate at 2k; keep headroom.
         max_tokens=8000,
         temperature=0.2,
     )
-    raw = (resp.choices[0].message.content or "").strip()
-    data = loads_llm_json(raw) or {}
+    raw = llm.completion_text(resp.choices[0].message).strip()
+    try:
+        data = llm.loads_json(raw, context="preview_chat")
+    except json.JSONDecodeError:
+        data = loads_llm_json(raw) or {}
+    if not isinstance(data, dict):
+        data = {}
     if not data:
-        logger.warning("preview_chat: non-JSON LLM response: %s", raw[:300])
+        logger.warning(
+            "preview_chat: non-JSON LLM response profile=%s: %s",
+            llm.profile_tag(),
+            raw[:300],
+        )
 
     reply = str(data.get("reply") or "").strip()
     action_raw = str(data.get("action") or "none").strip().lower()

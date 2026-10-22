@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List
 
 from app.services.extraction.pdf.llm_json import loads_llm_json
-from app.services.llm_prompts import OPENAI_MODEL, TABLE_AI_SEARCH_PROMPT
+from app.services.llm_prompts import TABLE_AI_SEARCH_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,10 @@ def suggest_tables_from_prompt(
     text = (prompt or "").strip()
     if not text:
         raise ValueError("prompt is required")
-    if not (api_key or "").strip():
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
+    if llm is None:
         raise ValueError("An LLM API key is required in Settings")
 
     catalog = [_catalog_entry(t) for t in tables if t.get("table_id") is not None]
@@ -78,24 +81,31 @@ def suggest_tables_from_prompt(
             "rationale": "No tables are available.",
         }
 
-    from openai import OpenAI
-
     user_prompt = TABLE_AI_SEARCH_PROMPT.format(
         prompt=text,
         catalog_json=json.dumps(catalog, ensure_ascii=False),
     )
-    client = OpenAI(api_key=api_key.strip())
+    client = llm.openai_sdk()
     resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
+        model=llm.model,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": user_prompt}],
         max_tokens=8000,
         temperature=0,
     )
-    raw = (resp.choices[0].message.content or "").strip()
-    data = loads_llm_json(raw) or {}
+    raw = llm.completion_text(resp.choices[0].message).strip()
+    try:
+        data = llm.loads_json(raw, context="suggest_search")
+    except json.JSONDecodeError:
+        data = loads_llm_json(raw) or {}
+    if not isinstance(data, dict):
+        data = {}
     if not data:
-        logger.warning("suggest_search: non-JSON LLM response: %s", raw[:300])
+        logger.warning(
+            "suggest_search: non-JSON LLM response profile=%s: %s",
+            llm.profile_tag(),
+            raw[:300],
+        )
         return {
             "intent": "find",
             "table_ids": [],

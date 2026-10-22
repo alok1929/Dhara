@@ -1,0 +1,37 @@
+# Dhara model-server catalogue. One LLM is served at a time.
+#
+# A ready id must match llm/<id>/ and Dockerfile SERVED_NAME.
+# Accept the Hugging Face license for each checkpoint. Gated weights need
+# LLM_HF_TOKEN / HUGGING_FACE_HUB_TOKEN.
+
+llm:
+  - id: phi-4-mini-instruct
+    name: Microsoft Phi-4-mini-instruct
+    status: ready
+    runtime: vllm
+    huggingface: microsoft/Phi-4-mini-instruct
+    parameters: 3.8B
+    context: 16384
+    notes: >-
+      Text chat for Dhara. Weights stay in the vLLM container. First start
+      downloads into the hf_cache volume. Native context is longer; 16384
+      fits a 20 GB GPU.
+
+  - id: gemma-3-4b
+    name: Gemma 3 4B Instruct
+    status: ready
+    runtime: vllm
+    huggingface: google/gemma-3-4b-it
+    context: 32768
+    notes: >-
+      Alternate checkpoint. Set LLM_MODEL=gemma-3-4b and rebuild the llm
+      service. DHARA_LLM_MODEL must use the same id.
+
+  - id: gemma-2-9b-it
+    name: Gemma 2 9B Instruct
+    status: planned
+    runtime: vllm
+    huggingface: google/gemma-2-9b-it
+    notes: >-
+      Not built yet. Copy llm/gemma-3-4b, set MODEL_ID and SERVED_NAME to
+      gemma-2-9b-it, and raise GPU memory. Swap LLM_MODEL between runs to compare.

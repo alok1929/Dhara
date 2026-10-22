@@ -12,17 +12,27 @@ PaaS. All required services can run in Docker.
 
 ## LLM and PDF extraction (important)
 
-DHARA does **not** need a public SaaS LLM vendor name — configure a
-**MEITY-empanelled LLM** API key in **Settings**. Server `.env` keys are not
-used for AI calls.
+Chat goes through `app.services.llm`. Precedence is **mock → on-prem env → Settings key → none**.
 
 | Mode | What happens |
 |------|----------------|
-| **With Settings LLM key** | Full PDF path: PyMuPDF candidates → confidence split → LLM reconstruct/classify for ambiguous pages; richer Excel assist, NCO suggest, singleton grouping merge |
-| **Without Settings key** | Uploads still work. PyMuPDF extracts ruled tables; ambiguous pages use heuristics and need more steward review. Excel extract is structural; AI fill / NCO / LLM singleton merge are skipped. There is no server-side key fallback |
+| **On-prem env** (`DHARA_LLM_BASE_URL` and `DHARA_LLM_MODEL`) | Chat uses the model-server gateway and **vLLM**. A Settings key is ignored for chat. See [model-server](./model-server.md). |
+| **Settings LLM key** (no on-prem env) | Cloud OpenAI-compatible or Anthropic key from Settings. PDF path: PyMuPDF candidates → confidence split → LLM reconstruct/classify for ambiguous pages; richer Excel assist, NCO suggest, singleton grouping merge |
+| **Neither** | Uploads still work. PyMuPDF extracts ruled tables; ambiguous pages use heuristics and need more steward review. Excel extract is structural; AI fill / NCO / LLM singleton merge are skipped |
 
-Air-gapped PDF ingest is usable without a key, with more human review on
-complex pages. Paste a MEITY-compatible key in Settings when AI assist is available.
+Embeddings are not served by the vLLM chat container. They use a Settings OpenAI
+key when one is stored, otherwise a local pseudo-embedding.
+
+The API process runs PDF jobs in-process. Set `DHARA_LLM_*` on that process.
+If you later run a separate worker, give it the same variables or on-prem chat
+will not be used.
+
+`DHARA_LLM_BASE_URL` may omit `/v1` (`http://model-gateway:8100`). The factory
+normalizes it. Details, the catalogue id contract, and MEITY versus this
+gateway are in [model-server](./model-server.md).
+
+Air-gapped PDF ingest is usable without a key and without vLLM, with more human
+review on complex pages.
 
 ## 1. Quick start (recommended)
 
@@ -166,4 +176,5 @@ dedicated database/role for DHARA.
 - Public DNS (internal hostname is fine)
 - A MEITY-empanelled LLM (optional — improves PDF reconstruction and assists)
 
-See [configuration](./configuration.md) for the full env list.
+See [configuration](./configuration.md) for the full env list and
+[model-server](./model-server.md) for the vLLM gateway.

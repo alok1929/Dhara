@@ -90,6 +90,9 @@ class Settings:
     mcp_http_auth: str
     mcp_auth_token: str
     dhara_llm_provider: str | None
+    dhara_llm_base_url: str
+    dhara_llm_model: str
+    dhara_llm_api_key: str
 
 
 @lru_cache(maxsize=1)
@@ -132,6 +135,9 @@ def get_settings() -> Settings:
         dhara_llm_provider=(
             (os.environ.get("DHARA_LLM_PROVIDER") or "").strip().lower() or None
         ),
+        dhara_llm_base_url=(os.environ.get("DHARA_LLM_BASE_URL") or "").strip(),
+        dhara_llm_model=(os.environ.get("DHARA_LLM_MODEL") or "").strip(),
+        dhara_llm_api_key=(os.environ.get("DHARA_LLM_API_KEY") or "").strip(),
     )
 
 

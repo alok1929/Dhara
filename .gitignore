@@ -29,6 +29,7 @@ backend/typing_inspection/
 
 # Environment — never commit secrets
 backend/.env
+deploy/model-server/.env
 backend/venv/
 frontend/.env
 
@@ -73,9 +74,11 @@ frontend/tsconfig.tsbuildinfo
 
 # Generated test/tool output — not source
 backend/pdf_pipeline_test_report.json
+scripts/output/
 .playwright-mcp/
 
 Testing files
 .venv312
 media_to_upload1762321618.pdf
 chat_cli_downloads/789434515c3641b8914bffb6bfc28956_selected_tables.zip
+births_death_report_2024_cond.pdf

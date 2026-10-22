@@ -13,6 +13,7 @@ DHARA runs as:
 | Goal | Guide |
 |------|--------|
 | Laptop / datacenter / air-gapped VM | [On-prem](./on-prem.md) |
+| On-prem vLLM chat (gateway) | [Model server](./model-server.md) |
 | GCP Cloud Run, Render, managed DB | [Cloud](./cloud.md) |
 | Env vars and secrets | [Configuration](./configuration.md) |
 

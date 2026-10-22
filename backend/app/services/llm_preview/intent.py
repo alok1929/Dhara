@@ -6,13 +6,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 
 from app.services.llm_prompts import (
     LLM_GROUPING_INTENT_EXTRA,
     LLM_PREVIEW_INTENT_HUMAN_PROMPT,
     LLM_PREVIEW_INTENT_SYSTEM_PROMPT,
-    OPENAI_MODEL,
 )
 from app.services.llm_preview.schemas import LlmActionPlan, LlmActionType
 from app.services.preview.tables import sanitize_table_ids
@@ -48,7 +46,10 @@ def plan_from_user_request(
     text = (user_request or "").strip()
     if not text:
         raise ValueError("user_request is required")
-    if not (api_key or "").strip():
+    from app.services.llm.factory import live_openai_chat
+
+    llm_client = live_openai_chat(api_key)
+    if llm_client is None:
         raise ValueError("An LLM API key is required in Settings")
 
     valid_ids = {
@@ -63,11 +64,7 @@ def plan_from_user_request(
             rationale="No tables are available.",
         )
 
-    llm = ChatOpenAI(
-        model=OPENAI_MODEL,
-        temperature=0,
-        api_key=api_key.strip(),
-    )
+    llm = llm_client.langchain_chat(temperature=0)
     compact_catalog = [
         {
             "table_id": str(c.get("table_id") or "").strip(),

@@ -6,9 +6,8 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 
-from app.services.llm_prompts import LLM_PREVIEW_SUMMARIZE_PROMPT, OPENAI_MODEL
+from app.services.llm_prompts import LLM_PREVIEW_SUMMARIZE_PROMPT
 from app.services.llm_preview.schemas import CatalogSummarizeResult, PreviewCatalogEntry
 
 logger = logging.getLogger(__name__)
@@ -74,7 +73,10 @@ def summarize_tables_catalog(
     Prefer ``catalog_from_tables`` for the normal POST path; call this only when
     ``force_summarize`` is set.
     """
-    if not (api_key or "").strip():
+    from app.services.llm.factory import live_openai_chat
+
+    llm_client = live_openai_chat(api_key)
+    if llm_client is None:
         raise ValueError("An LLM API key is required in Settings")
 
     stubs = [_stub_entry(t) for t in tables if t.get("table_id") is not None]
@@ -84,11 +86,7 @@ def summarize_tables_catalog(
     by_id = {e.table_id: e for e in stubs}
     llm_input = [_table_stub_for_llm(t) for t in tables if t.get("table_id") is not None]
 
-    llm = ChatOpenAI(
-        model=OPENAI_MODEL,
-        temperature=0,
-        api_key=api_key.strip(),
-    )
+    llm = llm_client.langchain_chat(temperature=0)
     structured = llm.with_structured_output(CatalogSummarizeResult)
     prompt = ChatPromptTemplate.from_messages(
         [

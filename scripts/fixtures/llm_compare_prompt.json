@@ -1,0 +1,10 @@
+{
+  "description": "Frozen one-turn JSON extraction used to compare chat backends. Not a Settings profile.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return only JSON with keys title and rows. Title is Births by sex. Rows are two objects with sex and count: Female 12, Male 9."
+    }
+  ],
+  "expect_keys": ["title", "rows"]
+}

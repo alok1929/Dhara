@@ -84,7 +84,8 @@ app/mcp tools
 - Repositories own SQL. Catalogue and PDF still use psycopg2 in `catalogue/` and `pdf/pdf_store.py`. SQLAlchemy is used for auth, KYDS HTTP, and LLM key HTTP.
 - Storage goes through `ObjectStore`. Catalogue uploads go through the `core.gcs_utils` shim, which does reach `get_object_store()`. PDF bytes do not: they are stored in `pdf_jobs.pdf_bytes`. `LocalFileStore` is not selected by `get_object_store()`.
 - Workers call the ingestion service. Grouping and publish are separate and still live under `pdf/` and `catalogue/`.
-- Configuration for connections and secrets is `app/core/config.py`. Prompt text is `app/services/llm_prompts.py`.
+- Configuration for connections and secrets is `app/core/config.py`. Prompt text is `app/services/llm_prompts.py` (re-exported by `app/services/llm/prompts.py`).
+- Chat connections are `app/services/llm/factory.py`. Precedence is mock env, then on-prem `DHARA_LLM_*` (gateway to one **vLLM** OpenAI server per checkpoint folder), then the Settings key, then no LLM. One gateway FastAPI is the client-facing URL. There is not a FastAPI app per model. Deploy notes: `docs/deployment/model-server.md`.
 - Do not add abstractions that only rename a call. Move a vertical slice when a service can own a real function that routes and MCP both use.
 - Preserve HTTP paths and response fields unless a phase below says otherwise and tests cover the change.
 

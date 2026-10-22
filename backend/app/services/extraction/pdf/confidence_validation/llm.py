@@ -1,23 +1,21 @@
 """LLM table reconstruction + semantic classification API calls."""
 from __future__ import annotations
 
-import json
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-import openai
 import pandas as pd
 import pymupdf
 
+from app.services.llm.base_llm import LlmClient
+from app.services.llm.factory import live_openai_chat
 from app.services.llm_prompts import (
     BATCH_SIZE,
     BATCH_VALIDATION_MAX_TOKENS_CAP,
     LLM_VALIDATION_TEMPERATURE,
     MAX_TOKENS_PER_PAGE,
-    OPENAI_MODEL,
     OPENAI_WORKERS,
     PDF_VALIDATION_RAW_TEXT_CHARS,
     RAW_TEXT_CHARS_PER_PAGE_BATCHED,
@@ -53,30 +51,26 @@ def build_validation_prompt(page_num: int, candidates: List[Dict[str, Any]], tex
     )
 
 
-def validate_page(client: openai.OpenAI, page_num: int, candidates: List[Dict[str, Any]], text: str) -> Dict[str, Any]:
+def validate_page(client: LlmClient, page_num: int, candidates: List[Dict[str, Any]], text: str) -> Dict[str, Any]:
     prompt = build_validation_prompt(page_num, candidates, text)
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
+    sdk = client.openai_sdk()
+    resp = sdk.chat.completions.create(
+        model=client.model,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
         max_tokens=SINGLE_PAGE_MAX_TOKENS,
         temperature=LLM_VALIDATION_TEMPERATURE,
     )
-    text_out = resp.choices[0].message.content
-    try:
-        return json.loads(text_out)
-    except json.JSONDecodeError:
-        cleaned = re.sub(r"```[a-z]*\n?", "", text_out).strip().rstrip("`")
-        return json.loads(cleaned)
+    text_out = client.completion_text(resp.choices[0].message)
+    return client.loads_json(text_out, context="pdf_validate_page")
 
 
 def validate_all_pages(pages_grouped: Dict[int, List[Dict[str, Any]]], page_text: Dict[int, str],
                         n_workers: int = OPENAI_WORKERS,
                         api_key: Optional[str] = None) -> Dict[int, Dict[str, Any]]:
-    key = (api_key or "").strip()
-    if not key:
+    client = live_openai_chat(api_key)
+    if client is None:
         return {}
-    client = openai.OpenAI(api_key=key)
     validated: Dict[int, Dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {
@@ -129,11 +123,12 @@ def build_batch_validation_prompt(pages: List[int], pages_grouped: Dict[int, Lis
     )
 
 
-def validate_batch(client: openai.OpenAI, pages: List[int], pages_grouped: Dict[int, List[Dict[str, Any]]],
+def validate_batch(client: LlmClient, pages: List[int], pages_grouped: Dict[int, List[Dict[str, Any]]],
                     page_text: Dict[int, str]) -> Dict[int, Dict[str, Any]]:
     prompt = build_batch_validation_prompt(pages, pages_grouped, page_text)
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
+    sdk = client.openai_sdk()
+    resp = sdk.chat.completions.create(
+        model=client.model,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
         max_tokens=min(
@@ -141,12 +136,8 @@ def validate_batch(client: openai.OpenAI, pages: List[int], pages_grouped: Dict[
         ),
         temperature=LLM_VALIDATION_TEMPERATURE,
     )
-    text_out = resp.choices[0].message.content
-    try:
-        parsed = json.loads(text_out)
-    except json.JSONDecodeError:
-        cleaned = re.sub(r"```[a-z]*\n?", "", text_out).strip().rstrip("`")
-        parsed = json.loads(cleaned)
+    text_out = client.completion_text(resp.choices[0].message)
+    parsed = client.loads_json(text_out, context="pdf_validate_batch")
 
     by_page = parsed.get("pages", {})
     # ADDED: pass per-page pymupdf candidates + page text into stamp so
@@ -167,10 +158,9 @@ def validate_all_pages_batched(pages_grouped: Dict[int, List[Dict[str, Any]]], p
                                 batch_size: int = BATCH_SIZE, n_workers: int = OPENAI_WORKERS,
                                 progress_cb: Optional[Callable[[int, int], None]] = None,
                                 api_key: Optional[str] = None) -> Dict[int, Dict[str, Any]]:
-    key = (api_key or "").strip()
-    if not key:
+    client = live_openai_chat(api_key)
+    if client is None:
         return {}
-    client = openai.OpenAI(api_key=key)
     all_pages = list(pages_grouped.keys())
     batches = [all_pages[i:i + batch_size] for i in range(0, len(all_pages), batch_size)]
 

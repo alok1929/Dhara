@@ -276,8 +276,10 @@ async def pdf_ai_search_tables(
     if not prompt:
         raise HTTPException(400, "prompt is required")
 
+    from app.services.llm.factory import chat_ready
+
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
-    if not (api_key or "").strip():
+    if not chat_ready(api_key, _provider):
         raise HTTPException(400, "Save an LLM API key in Settings before using AI search")
 
     with _pdf_jobs_lock:
@@ -339,8 +341,10 @@ async def pdf_ai_chat_tables(
     if not prompt:
         raise HTTPException(400, "prompt is required")
 
+    from app.services.llm.factory import chat_ready
+
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
-    if not (api_key or "").strip():
+    if not chat_ready(api_key, _provider):
         raise HTTPException(400, "Save an LLM API key in Settings before using chat")
 
     with _pdf_jobs_lock:

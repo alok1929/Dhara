@@ -321,9 +321,15 @@ def _dynamic_score(query, node):
 def _embed_texts(extractor, texts):
     if extractor is None or getattr(extractor, "skip_llm", False):
         return None
-    if getattr(extractor, "provider", None) != "openai":
+    llm = getattr(extractor, "llm", None)
+    client = getattr(extractor, "embed_client", None)
+    # On-prem chat is vLLM. Embeddings stay on a cloud OpenAI client, or are skipped.
+    if client is None and llm is not None and getattr(llm, "is_on_prem", False):
         return None
-    client = getattr(extractor, "client", None)
+    if client is None:
+        if getattr(extractor, "provider", None) != "openai":
+            return None
+        client = getattr(extractor, "client", None)
     if client is None:
         return None
     try:

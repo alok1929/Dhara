@@ -58,7 +58,8 @@ def propose_groups_from_table_dicts(
     Same rules as ``propose_groups`` for a PDF job, without requiring Postgres:
       - SDG corpora → goal buckets (leftovers fall back to title groups)
       - otherwise → base-title buckets (URBAN/RURAL/ALL variants merge)
-      - optional strict LLM merge of remaining titled singletons when api_key set
+      - optional strict LLM merge of remaining titled singletons when on-prem
+        env or a Settings key is configured
 
     Each input table must be identifiable via ``id``, ``_uid``, or ``table_id``.
     """

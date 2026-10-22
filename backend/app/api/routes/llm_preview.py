@@ -61,10 +61,12 @@ def _sync_deletes_to_postgres(job_id: str, table_ids: list[str]) -> None:
 
 
 def _require_api_key(request: Request, user: CurrentUser, db: Session) -> str:
-    api_key, _provider = resolve_llm_credentials(request, user.email, db=db)
-    if not (api_key or "").strip():
+    from app.services.llm.factory import chat_ready
+
+    api_key, provider = resolve_llm_credentials(request, user.email, db=db)
+    if not chat_ready(api_key, provider):
         raise HTTPException(400, "Save an LLM API key in Settings before using llm_preview")
-    return api_key.strip()
+    return (api_key or "").strip()
 
 
 @router.post("/api/llm_preview/jobs/{job_id}/llm_preview_data")
