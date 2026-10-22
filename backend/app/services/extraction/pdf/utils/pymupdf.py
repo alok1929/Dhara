@@ -310,22 +310,46 @@ def _candidate_column_meta(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return [{"name": str(c), "header_path": [str(c)]} for c in df.columns]
 
 
+def row_values_at_index(df: pd.DataFrame, row_idx: int) -> List[Any]:
+    """Positional row as a flat list (duplicate row labels can yield a DataFrame)."""
+    row = df.iloc[row_idx]
+    if isinstance(row, pd.DataFrame):
+        return row.iloc[0].tolist()
+    return row.tolist()
+
+
+def column_values_at_index(df: pd.DataFrame, col_idx: int) -> List[Any]:
+    """Positional column as a flat list (duplicate column labels need iloc, not df[col])."""
+    col = df.iloc[:, col_idx]
+    if isinstance(col, pd.DataFrame):
+        return col.iloc[:, 0].tolist()
+    return col.tolist()
+
+
+def iter_dataframe_cell_values(df: pd.DataFrame):
+    """Yield each cell; safe when column names repeat."""
+    if df is None or getattr(df, "empty", True):
+        return
+    for i in range(int(df.shape[1])):
+        for v in column_values_at_index(df, i):
+            yield v
+
+
 def _dataframe_numeric_fill_ratio(df: pd.DataFrame) -> float:
     if df is None or getattr(df, "empty", True):
         return 0.0
     cells = 0
     numeric = 0
-    for col in df.columns:
-        for v in df[col].tolist():
-            cells += 1
-            s = str(v).strip() if v is not None else ""
-            if not s or s.lower() in {"none", "nan", "null"}:
-                continue
-            try:
-                float(s.replace(",", "").rstrip("%"))
-                numeric += 1
-            except ValueError:
-                pass
+    for v in iter_dataframe_cell_values(df):
+        cells += 1
+        s = str(v).strip() if v is not None else ""
+        if not s or s.lower() in {"none", "nan", "null"}:
+            continue
+        try:
+            float(s.replace(",", "").rstrip("%"))
+            numeric += 1
+        except ValueError:
+            pass
     return numeric / cells if cells else 0.0
 
 def _score_candidate_for_table_shape(

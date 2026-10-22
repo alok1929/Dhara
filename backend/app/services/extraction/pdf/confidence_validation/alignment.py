@@ -22,7 +22,10 @@ from app.services.extraction.pdf.utils.pymupdf import (
     _best_matching_ruled_candidate,
     _llm_missing_identity_stubs,
     _llm_starts_at_sex_column,
+    column_values_at_index,
     dedupe_candidates_by_bbox,
+    iter_dataframe_cell_values,
+    row_values_at_index,
 )
 
 from app.services.extraction.pdf.confidence_validation.table_confidence import table_dict_from_df
@@ -389,14 +392,13 @@ def _dataframe_numeric_fill_ratio(df: pd.DataFrame) -> float:
         return 0.0
     total = 0
     ok = 0
-    for col in df.columns:
-        for v in df[col].tolist():
-            flag = _cell_is_numeric(v)
-            if flag is None:
-                continue
-            total += 1
-            if flag:
-                ok += 1
+    for v in iter_dataframe_cell_values(df):
+        flag = _cell_is_numeric(v)
+        if flag is None:
+            continue
+        total += 1
+        if flag:
+            ok += 1
     if total == 0:
         return 0.0
     return ok / total
@@ -427,13 +429,13 @@ def _candidate_restores_blank_measures(
     if int(cand_df.shape[1]) != len(columns):
         return False
     skip_first = bool(len(cand_df)) and _row_is_column_index_strip(
-        cand_df.iloc[0].tolist()
+        row_values_at_index(cand_df, 0)
     )
     restored_any = False
     for idx in blank_idxs:
         if idx >= int(cand_df.shape[1]):
             return False
-        col_vals = cand_df.iloc[:, idx].tolist()
+        col_vals = column_values_at_index(cand_df, idx)
         if skip_first:
             col_vals = col_vals[1:]
         nonempty = [v for v in col_vals if not _cell_is_empty(v)]
@@ -581,7 +583,7 @@ def _candidate_evidences_direction_column(
             # Icon-only Direction often lands as an unnamed last column of
             # garbled glyphs / up-down tokens while other columns are numeric.
             if df.shape[1] >= 2:
-                last_vals = df.iloc[:, -1].tolist()
+                last_vals = column_values_at_index(df, int(df.shape[1]) - 1)
                 non_empty = [v for v in last_vals if not _cell_is_empty(v)]
                 if non_empty:
                     dir_like = sum(

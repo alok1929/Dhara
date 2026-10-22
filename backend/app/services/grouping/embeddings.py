@@ -14,6 +14,13 @@ from app.services.grouping.matching import _base_title, build_group_name
 
 EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
+# Column-level vectors are optional; grouping only reads table_summary embeddings.
+_EMBED_COLUMNS = os.environ.get("PDF_GROUP_EMBED_COLUMNS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 DEFAULT_DISTANCE_THRESHOLD = float(os.environ.get("PDF_GROUP_DISTANCE", "0.42"))
 
 TOP_K = int(os.environ.get("PDF_GROUP_TOP_K", "8"))
@@ -76,8 +83,15 @@ def embed_texts(texts: list[str], api_key: Optional[str] = None) -> list[list[fl
         from openai import OpenAI
         client = OpenAI(api_key=key)
         out: list[list[float]] = []
-        for i in range(0, len(texts), 64):
+        batch_count = (len(texts) + 63) // 64
+        for bi, i in enumerate(range(0, len(texts), 64)):
             chunk = texts[i : i + 64]
+            if batch_count > 1:
+                print(
+                    f"[pdf_grouping] embeddings batch {bi + 1}/{batch_count} "
+                    f"({len(chunk)} texts)",
+                    flush=True,
+                )
             resp = client.embeddings.create(model=EMBED_MODEL, input=chunk)
             by_idx = {d.index: d.embedding for d in resp.data}
             out.extend(by_idx[j] for j in range(len(chunk)))
@@ -88,8 +102,14 @@ def embed_texts(texts: list[str], api_key: Optional[str] = None) -> list[list[fl
 
 def index_tables(session, job_id: str, tables: list[dict], api_key: Optional[str] = None) -> int:
     """Chunk + upsert embeddings for tables. Returns number of summary chunks written."""
+    if not tables:
+        return 0
     vs.ensure_semantic_embeddings_table(session)
     summaries = [build_table_summary_chunk(t) for t in tables]
+    print(
+        f"[pdf_grouping] indexing {len(tables)} table(s) — embedding summaries…",
+        flush=True,
+    )
     vectors = embed_texts(summaries, api_key=api_key)
     n = 0
     for table, text, emb in zip(tables, summaries, vectors):
@@ -107,11 +127,19 @@ def index_tables(session, job_id: str, tables: list[dict], api_key: Optional[str
         )
         n += 1
 
-        col_chunks = build_column_chunks(table)
-        if col_chunks:
-            col_texts = [c[1] for c in col_chunks]
+    if _EMBED_COLUMNS:
+        col_records: list[tuple[dict, str, str]] = []
+        for table in tables:
+            for kind, ctext in build_column_chunks(table):
+                col_records.append((table, kind, ctext))
+        if col_records:
+            col_texts = [r[2] for r in col_records]
+            print(
+                f"[pdf_grouping] embedding {len(col_texts)} column chunk(s) (batched)…",
+                flush=True,
+            )
             col_vecs = embed_texts(col_texts, api_key=api_key)
-            for (kind, ctext), cemb in zip(col_chunks, col_vecs):
+            for (table, kind, ctext), cemb in zip(col_records, col_vecs):
                 vs.upsert_embedding(
                     session,
                     object_type="pdf_table",

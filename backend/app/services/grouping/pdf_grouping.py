@@ -230,6 +230,11 @@ def propose_groups(
             "indexed": 0,
         }
 
+    print(
+        f"[pdf_grouping] propose_groups job={job_id} tables={len(tables)} reindex={reindex}",
+        flush=True,
+    )
+
     indexed = 0
     embeddings: dict[str, list[float]] = {}
     key = (api_key or "").strip() or None

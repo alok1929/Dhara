@@ -23,6 +23,7 @@ import ChatTaskBlock from './ChatTaskBlock'
 import ChatRightPanel from './ChatRightPanel'
 import ChatFloatingProceed from './ChatFloatingProceed'
 import ChatTableResultBlock from './ChatTableResultBlock'
+import ChatTypingIndicator from './ChatTypingIndicator'
 import {
   clearLegacyChatMessages,
   loadChatActiveJob,
@@ -114,6 +115,7 @@ export default function ChatConsole({
   const [deletingMessageId, setDeletingMessageId] = useState(null)
   const anchorRefs = useRef({})
   const scrollRootRef = useRef(null)
+  const typingAnchorRef = useRef(null)
   const pdfReviewRef = useRef(null)
 
   const {
@@ -414,6 +416,14 @@ export default function ChatConsole({
       consumingStatusPageRef.current = false
     })
   }, [statusPage, step, setStatusPage, runChatStatusPage])
+
+  useEffect(() => {
+    if (!composerLoading) return
+    const t = window.setTimeout(() => {
+      typingAnchorRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+    }, 40)
+    return () => window.clearTimeout(t)
+  }, [composerLoading, messages.length])
 
   const openPreviewTable = useCallback((tableId, { tableIds = null, rationale = '', prompt = '' } = {}) => {
     const focusId = tableId != null ? String(tableId) : null
@@ -1202,6 +1212,11 @@ export default function ChatConsole({
                   }
                   return null
                 })}
+                {composerLoading && (
+                  <div ref={typingAnchorRef}>
+                    <ChatTypingIndicator />
+                  </div>
+                )}
               </div>
             )}
           </ChatScrollRegion>

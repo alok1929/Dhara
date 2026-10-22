@@ -201,6 +201,23 @@ html {
   animation: dhara-carousel-back 520ms var(--dhara-ease) both;
 }
 
+@keyframes chat-typing-dot {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+
+.chat-typing-dot {
+  animation: chat-typing-dot 1.15s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dhara-duration: 1ms;
@@ -218,6 +235,11 @@ html {
   select,
   textarea {
     transition: none !important;
+  }
+
+  .chat-typing-dot {
+    animation: none !important;
+    opacity: 0.65;
   }
 
   .dhara-page-enter,

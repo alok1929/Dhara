@@ -182,8 +182,8 @@ def coerce_dual_stack_half_df(df: Any) -> Any:
     if not _row_looks_like_real_column_header(col_as_row):
         body_rows.append(col_as_row)
 
-    for _, series in df.iterrows():
-        body_rows.append([_cell_str(v) for v in series.tolist()])
+    for row in df.values.tolist():
+        body_rows.append([_cell_str(v) for v in row])
 
     col_names = _resolve_column_names(ncol, col_as_row, df.columns)
     trend_idx = _trend_column_index(col_names)
