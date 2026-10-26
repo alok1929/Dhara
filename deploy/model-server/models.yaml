@@ -27,6 +27,20 @@ llm:
       Alternate checkpoint. Set LLM_MODEL=gemma-3-4b and rebuild the llm
       service. DHARA_LLM_MODEL must use the same id.
 
+  - id: gemma-2-2b-it
+    name: Gemma 2 2B Instruct
+    status: ready
+    runtime: vllm
+    device: cpu
+    huggingface: google/gemma-2-2b-it
+    parameters: 2.6B
+    context: 8192
+    notes: >-
+      Small instruct checkpoint for a machine with no GPU. Use Compose
+      profile llm-cpu (the vLLM CPU image). Do not enable the llm profile,
+      which reserves an NVIDIA GPU. Native context is 8192. Set
+      LLM_MODEL=gemma-2-2b-it. DHARA_LLM_MODEL must use the same id.
+
   - id: gemma-2-9b-it
     name: Gemma 2 9B Instruct
     status: planned

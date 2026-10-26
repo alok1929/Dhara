@@ -1,13 +1,22 @@
 # Dhara on-prem chat: one FastAPI gateway, one vLLM OpenAI server.
 #
-# The llm folder is a Dockerfile (vllm/vllm-openai), not an application.
-# Switching checkpoints is LLM_MODEL=<folder> plus a rebuild of `llm`.
+# The llm folder is a Dockerfile, not an application. GPU checkpoints use
+# vllm/vllm-openai and profile llm. gemma-2-2b-it uses vllm/vllm-openai-cpu
+# and profile llm-cpu. Enable only one of those profiles. They share the
+# container name dhara-model-llm.
+#
+# Switching checkpoints is LLM_MODEL=<folder> plus a rebuild.
 # Dhara sets DHARA_LLM_BASE_URL=http://model-gateway:8100 and
 # DHARA_LLM_MODEL to the same catalogue id (SERVED_NAME).
 #
 #   cd deploy/model-server
 #   cp .env.example .env
+#   # GPU:
 #   docker compose -f compose.llm-only.yml --profile llm up -d --build
+#   # CPU. The inline LLM_MODEL keeps the gateway id equal to SERVED_NAME
+#   # even when .env still points at a GPU checkpoint. Do not also enable
+#   # profile llm (COMPOSE_PROFILES=llm); both profiles share one container name.
+#   LLM_MODEL=gemma-2-2b-it docker compose -f compose.llm-only.yml --profile llm-cpu up -d --build
 
 name: dhara-model-server
 
@@ -85,6 +94,46 @@ services:
       start_period: 900s
     networks: [model_net]
     <<: *gpu-llm
+
+  # Same slot as `llm`, without an NVIDIA device. The network alias `llm`
+  # is what the gateway calls. Do not enable profile llm at the same time.
+  llm-cpu:
+    profiles: ["llm-cpu"]
+    build:
+      context: ./llm/${LLM_MODEL:-gemma-2-2b-it}
+    image: dhara/model-llm:${LLM_MODEL:-gemma-2-2b-it}
+    container_name: dhara-model-llm
+    restart: unless-stopped
+    shm_size: "4gb"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_NICE
+    environment:
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      # Keep this off the GPU default (VLLM_MAX_MODEL_LEN is 16384+).
+      MAX_MODEL_LEN: ${VLLM_CPU_MAX_MODEL_LEN:-8192}
+      MAX_NUM_SEQS: ${VLLM_CPU_MAX_NUM_SEQS:-2}
+      VLLM_CPU_KVCACHE_SPACE: ${VLLM_CPU_KVCACHE_SPACE:-4}
+      VLLM_CPU_OMP_THREADS_BIND: ${VLLM_CPU_OMP_THREADS_BIND:-auto}
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-${HF_TOKEN:-}}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks:
+      model_net:
+        aliases:
+          - llm
 
 volumes:
   hf_cache:

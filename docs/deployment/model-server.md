@@ -2,9 +2,10 @@
 
 Dhara does not load model weights. On-prem chat is a **vLLM OpenAI server**
 behind **one FastAPI gateway**. Each checkpoint is a Dockerfile under
-`deploy/model-server/llm/<catalogue-id>/`, based on `vllm/vllm-openai`.
-The gateway is the only URL the API should use. Change
-`Dhara/deploy/model-server/` when the checkpoint or proxy changes.
+`deploy/model-server/llm/<catalogue-id>/`. GPU checkpoints use
+`vllm/vllm-openai`. `gemma-2-2b-it` uses `vllm/vllm-openai-cpu` (Linux amd64
+and arm64, no NVIDIA device). The gateway is the only URL the API should use.
+Change `Dhara/deploy/model-server/` when the checkpoint or proxy changes.
 
 ## What runs
 
@@ -14,7 +15,8 @@ The gateway is the only URL the API should use. Change
 | `llm` slot | `vllm serve` (OpenAI API) | internal `:8003` only |
 
 There is not a FastAPI app per model. `compose.llm-only.yml` runs the gateway
-and one vLLM container.
+and one vLLM container. Profile `llm` is the GPU container. Profile `llm-cpu`
+is the same slot with no NVIDIA reservation. Enable only one of them.
 
 Accept the Hugging Face license for the checkpoint you run. Gated repos need
 `LLM_HF_TOKEN` (passed through as `HUGGING_FACE_HUB_TOKEN`). First start can
@@ -31,8 +33,15 @@ cp .env.example .env
 docker compose -f compose.llm-only.yml --profile llm up -d --build
 ```
 
-`COMPOSE_PROFILES=llm` (in `.env`) is required or the vLLM service stays off.
-The gateway still starts without that profile and answers 503 for chat.
+`COMPOSE_PROFILES=llm` (in `.env`) starts the GPU service. For Gemma 2 2B on
+CPU, set `COMPOSE_PROFILES=llm-cpu` in `.env` (do not leave `llm` set) and start
+with the gateway id pinned to the CPU checkpoint:
+
+```bash
+LLM_MODEL=gemma-2-2b-it docker compose -f compose.llm-only.yml --profile llm-cpu up -d --build
+```
+
+The gateway still starts without a model profile and answers 503 for chat.
 
 Check the catalogue id:
 
@@ -96,7 +105,8 @@ an ops env change, not a Settings provider.
 
 The default folder is `llm/phi-4-mini-instruct` (`microsoft/Phi-4-mini-instruct`,
 3.8B, context 16384 so a 20 GB GPU can load it). `llm/gemma-3-4b` is a second
-ready recipe. A 9B-class model is another folder (see
+GPU recipe. `llm/gemma-2-2b-it` is Gemma 2 2B Instruct on the CPU image
+(context 8192, about 2.6B). A 9B-class model is another folder (see
 `deploy/model-server/llm/README.md` and the planned row `gemma-2-9b-it` in
 `models.yaml`). Comparison is not a Settings dropdown. Rebuild with a different
 `LLM_MODEL`, set `DHARA_LLM_MODEL` to that id, or run
