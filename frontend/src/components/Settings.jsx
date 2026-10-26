@@ -19,10 +19,38 @@ import { SDG_CONCEPT_TEMPLATE } from '../lib/sdgConcepts'
 import { withAuthHeaders } from '../lib/auth'
 import FileUpload from './FileUpload'
 
-const PROVIDERS = [
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'self-hosted', label: 'Self-hosted' },
-]
+const LLM_CHOICE_OPENAI = 'openai'
+
+function savedLlmChoiceFromSettings(settings) {
+  if (settings?.chatSource === 'on_prem' && settings?.onPremModel) {
+    return `on_prem:${settings.onPremModel}`
+  }
+  return LLM_CHOICE_OPENAI
+}
+
+function parseLlmChoice(value) {
+  if (!value || value === LLM_CHOICE_OPENAI) {
+    return { isOpenAI: true, chatSource: 'cloud', onPremModel: '' }
+  }
+  if (String(value).startsWith('on_prem:')) {
+    return {
+      isOpenAI: false,
+      chatSource: 'on_prem',
+      onPremModel: String(value).slice('on_prem:'.length),
+    }
+  }
+  return { isOpenAI: true, chatSource: 'cloud', onPremModel: '' }
+}
+
+function onPremModelLabel(model) {
+  const name = model.name || model.id
+  const short = name
+    .replace(/^Microsoft\s+/i, '')
+    .replace(/^Gemma 3\s+/i, 'Gemma ')
+    .trim()
+  return model.on_gateway ? `${short} (on prem)` : short
+}
+
 const ROLES = ['Administrator', 'Data Steward', 'Data User']
 
 const SETTINGS_METADATA_FIELDS = [
@@ -89,15 +117,109 @@ export default function Settings({
   const [metadataStandard, setMetadataStandard] = useState(getMetadataStandard)
   const [savedMetadataStandard, setSavedMetadataStandard] = useState(getMetadataStandard)
   const [pickingFields, setPickingFields] = useState(false)
+  const [llmCatalog, setLlmCatalog] = useState(null)
+  const [llmCatalogError, setLlmCatalogError] = useState('')
+  const [llmChoice, setLlmChoice] = useState(() => savedLlmChoiceFromSettings(settings))
+  const [chatModeBusy, setChatModeBusy] = useState(false)
+  const [chatModeError, setChatModeError] = useState('')
+  const [llmSaveOk, setLlmSaveOk] = useState(false)
+
+  const loadLlmCatalog = useCallback(async () => {
+    setLlmCatalogError('')
+    try {
+      const res = await fetch('/api/llm-catalog', withAuthHeaders())
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || 'Failed to load on-prem models')
+      setLlmCatalog(data)
+    } catch (err) {
+      setLlmCatalog(null)
+      setLlmCatalogError(err.message || 'Failed to load on-prem models')
+    }
+  }, [])
 
   // AppContext loads the decrypted key from GET /api/llm-key — keep the form in sync.
   useEffect(() => {
     setLocal(settings)
+    setLlmChoice(savedLlmChoiceFromSettings(settings))
+    setLlmSaveOk(false)
   }, [settings])
 
   useEffect(() => {
     if (VALID_TABS.has(initialTab)) setActiveTab(initialTab)
   }, [initialTab])
+
+  useEffect(() => {
+    loadLlmCatalog()
+  }, [loadLlmCatalog])
+
+  const localVllmModels = (llmCatalog?.models || []).filter((m) => m.local_vllm)
+
+  const persistChatMode = async (nextSource, nextModel) => {
+    setChatModeError('')
+    setChatModeBusy(true)
+    try {
+      const res = await fetch(
+        '/api/llm-chat-mode',
+        withAuthHeaders({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_source: nextSource,
+            on_prem_model: nextModel || null,
+          }),
+        }),
+      )
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || 'Could not save LLM mode')
+      const chatSource = data.chat_source === 'on_prem' ? 'on_prem' : 'cloud'
+      const onPremModel = data.on_prem_model || nextModel || ''
+      setLlmChoice(
+        chatSource === 'on_prem' && onPremModel
+          ? `on_prem:${onPremModel}`
+          : LLM_CHOICE_OPENAI,
+      )
+      onSettingsChange({
+        ...local,
+        chatSource,
+        onPremModel,
+      })
+      setLlmSaveOk(true)
+      await loadLlmCatalog()
+      return true
+    } catch (err) {
+      setChatModeError(err.message || 'Could not save LLM mode')
+      return false
+    } finally {
+      setChatModeBusy(false)
+    }
+  }
+
+  const parsedLlmChoice = parseLlmChoice(llmChoice)
+  const savedLlmChoice = savedLlmChoiceFromSettings(settings)
+
+  const onLlmChoiceChange = (e) => {
+    setLlmChoice(e.target.value)
+    setLlmSaveOk(false)
+    setChatModeError('')
+  }
+
+  const saveLlmSettings = async () => {
+    setChatModeError('')
+    setLlmSaveOk(false)
+    const parsed = parseLlmChoice(llmChoice)
+    if (parsed.isOpenAI) {
+      const modeOk = await persistChatMode('cloud', null)
+      if (!modeOk) return
+      onSaveKey({
+        ...local,
+        provider: 'openai',
+        chatSource: 'cloud',
+        onPremModel: '',
+      })
+      return
+    }
+    await persistChatMode('on_prem', parsed.onPremModel)
+  }
 
   const setDatasetIdField = (key) => (e) => setDatasetIdConfig((prev) => ({ ...prev, [key]: e.target.value }))
 
@@ -108,18 +230,25 @@ export default function Settings({
   }
   const setUserField = (key) => (e) => onUserChange({ ...user, [key]: e.target.value })
 
-  const status = llmCryptoError
-    ? 'Stored key could not be decrypted — enter a new key'
-    : keySaved
-      ? 'Key saved'
-      : local.apiKey
-        ? 'Unsaved changes'
-        : 'No key configured'
-  const statusClass = llmCryptoError
-    ? 'settings-key-status-warn'
-    : keySaved
+  const llmChoiceDirty = llmChoice !== savedLlmChoice
+  const openAiKeyDirty = parsedLlmChoice.isOpenAI && Boolean(local.apiKey) && !keySaved
+
+  const status = (() => {
+    if (parsedLlmChoice.isOpenAI) {
+      if (llmCryptoError) return 'Stored key could not be decrypted — enter a new key'
+      if (llmChoiceDirty || openAiKeyDirty) return 'Unsaved changes'
+      if (keySaved && savedLlmChoice === LLM_CHOICE_OPENAI) return 'Saved'
+      if (keySaved) return 'Key saved'
+      return 'No key configured'
+    }
+    if (llmChoiceDirty) return 'Unsaved changes'
+    if (llmSaveOk || !llmChoiceDirty) return 'Saved'
+    return 'Choose a model and save'
+  })()
+  const statusClass =
+    status === 'Saved' || status === 'Key saved'
       ? 'settings-key-status-ok'
-      : local.apiKey
+      : status === 'Unsaved changes' || llmCryptoError
         ? 'settings-key-status-warn'
         : 'settings-key-status-none'
 
@@ -238,41 +367,78 @@ export default function Settings({
         <div className="flex flex-col gap-1">
           <div className="text-[16px] font-semibold tracking-tight text-ink">LLM</div>
           <div className="text-sm text-ink-soft">
-            One API key powers metadata auto-fill, NCO matching suggestions, and other AI assists. Save it here before those steps.
+            Pick OpenAI (cloud API key) or a local model. Only your selection is used for chat and PDF AI.
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-4">
+
+        {chatModeError ? <p className="text-sm text-yellow">{chatModeError}</p> : null}
+        {llmCatalogError ? <p className="text-sm text-yellow">{llmCatalogError}</p> : null}
+
+        <div className={`grid gap-4 ${parsedLlmChoice.isOpenAI ? 'grid-cols-2' : 'grid-cols-1'}`}>
           <div className="flex flex-col gap-1.5">
-            <label className={fieldLabelClass}>Provider</label>
-            <select className={inputClass} value={local.provider} onChange={setField('provider')}>
-              {PROVIDERS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
+            <label className={fieldLabelClass} htmlFor="llm-provider-select">
+              Provider
+            </label>
+            <select
+              id="llm-provider-select"
+              className={inputClass}
+              value={llmChoice}
+              disabled={chatModeBusy}
+              onChange={onLlmChoiceChange}
+            >
+              <option value={LLM_CHOICE_OPENAI}>OpenAI</option>
+              {localVllmModels.map((m) => (
+                <option key={m.id} value={`on_prem:${m.id}`}>
+                  {onPremModelLabel(m)}
+                </option>
               ))}
             </select>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <label className={fieldLabelClass}>API key</label>
-            <input
-              className={inputClass}
-              type="password"
-              value={local.apiKey}
-              onChange={setField('apiKey')}
-              placeholder={llmCryptoError ? 'Re-enter API key' : 'API key'}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
+          {parsedLlmChoice.isOpenAI ? (
+            <div className="flex flex-col gap-1.5">
+              <label className={fieldLabelClass} htmlFor="llm-api-key">
+                API key
+              </label>
+              <input
+                id="llm-api-key"
+                className={inputClass}
+                type="password"
+                value={local.apiKey}
+                onChange={setField('apiKey')}
+                placeholder={llmCryptoError ? 'Re-enter API key' : 'API key'}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+          ) : null}
         </div>
-        <div className="flex items-center gap-3.5">
-          <Button
-            onClick={() => {
-              // Persist the form's local value (not a click event / stale context).
-              onSaveKey(local)
-            }}
-          >
-            Save key
+
+        {!parsedLlmChoice.isOpenAI && llmCatalog?.on_prem?.configured ? (
+          <p className="text-sm text-ink-soft">
+            Gateway:{' '}
+            {llmCatalog.gateway?.reachable ? (
+              <span className="text-green">reachable</span>
+            ) : (
+              <span className="text-yellow">not reachable — start the model gateway on :8100</span>
+            )}
+          </p>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-3.5">
+          <Button type="button" disabled={chatModeBusy} onClick={() => void saveLlmSettings()}>
+            Save
           </Button>
-          <span className={statusClass === 'settings-key-status-ok' ? statusToneClass.ok : statusClass === 'settings-key-status-warn' ? statusToneClass.warn : statusToneClass.none}>{status}</span>
+          <span
+            className={
+              statusClass === 'settings-key-status-ok'
+                ? statusToneClass.ok
+                : statusClass === 'settings-key-status-warn'
+                  ? statusToneClass.warn
+                  : statusToneClass.none
+            }
+          >
+            {status}
+          </span>
         </div>
       </div>
 

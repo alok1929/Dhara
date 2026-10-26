@@ -1,11 +1,14 @@
 """Resolve which chat server to call.
 
-Precedence (API and workers, same process env):
+Precedence (per signed-in user when routing is bound or loaded from DB):
 
 1. ``DHARA_LLM_PROVIDER=mock`` — no HTTP
-2. ``DHARA_LLM_BASE_URL`` and ``DHARA_LLM_MODEL`` — gateway → vLLM; user key ignored for chat
-3. Settings key — OpenAI-compat (no per-user base URL in v1) or Anthropic
+2. User chose **on-prem** and ``DHARA_LLM_*`` is set — gateway → vLLM
+3. User chose **cloud** (default) — Settings key → OpenAI / Anthropic
 4. none — callers skip LLM / use heuristics
+
+Without user routing (benchmark scripts, ``get_llm_for_request`` only): on-prem
+env still wins when configured, same as before.
 """
 
 from __future__ import annotations
@@ -18,12 +21,21 @@ from app.core.config import get_settings
 from app.services.credentials import service as credentials_service
 from app.services.llm.base_llm import LlmClient
 from app.services.llm.profiles import LlmProfile, normalize_openai_base_url
+from app.services.llm.routing import (
+    CHAT_SOURCE_CLOUD,
+    CHAT_SOURCE_ON_PREM,
+    LlmChatRouting,
+    current_llm_routing,
+)
 from app.services.llm_prompts import ANTHROPIC_MODEL, OPENAI_MODEL
 
 
 def get_llm_for_user(session: Session, user_email: str) -> Optional[LlmClient]:
-    """Resolve chat for a signed-in user. On-prem env ignores the stored key."""
-    decided = _from_env()
+    """Resolve chat for a signed-in user (DB routing + stored key)."""
+    from app.db.repositories import llm_keys as llm_repo
+
+    routing = llm_repo.get_routing(session, user_email)
+    decided = _from_env(routing=routing)
     if decided is not None:
         return decided
     key, provider = credentials_service.resolve_for_user(session, user_email)
@@ -33,9 +45,11 @@ def get_llm_for_user(session: Session, user_email: str) -> Optional[LlmClient]:
 def get_llm_for_request(
     api_key: Optional[str] = None,
     provider: Optional[str] = None,
+    *,
+    routing: LlmChatRouting | None = None,
 ) -> Optional[LlmClient]:
-    """Same precedence as :func:`get_llm_for_user`, using an already-loaded key."""
-    decided = _from_env()
+    """Same as :func:`get_llm_for_user`, using an already-loaded key + optional routing."""
+    decided = _from_env(routing=routing or current_llm_routing())
     if decided is not None:
         return decided
     key = (api_key or "").strip() or None
@@ -43,36 +57,56 @@ def get_llm_for_request(
     return _from_user_key(key, prov)
 
 
-def chat_ready(api_key: Optional[str] = None, provider: Optional[str] = None) -> bool:
-    """True when a non-mock chat profile is configured (on-prem or a user key)."""
-    client = get_llm_for_request(api_key, provider)
+def chat_ready(
+    api_key: Optional[str] = None,
+    provider: Optional[str] = None,
+    *,
+    routing: LlmChatRouting | None = None,
+) -> bool:
+    """True when a non-mock chat profile is configured."""
+    client = get_llm_for_request(api_key, provider, routing=routing)
+    return client is not None and not client.is_mock
+
+
+def chat_ready_for_user(session: Session, user_email: str) -> bool:
+    client = get_llm_for_user(session, user_email)
     return client is not None and not client.is_mock
 
 
 def live_openai_chat(
     api_key: Optional[str] = None,
     provider: Optional[str] = None,
+    *,
+    routing: LlmChatRouting | None = None,
 ) -> Optional[LlmClient]:
-    """OpenAI-compatible client, or None for mock / Anthropic-only / unconfigured.
-
-    On-prem always returns this client (vLLM), even if the user key is ``sk-ant-``.
-    """
-    client = get_llm_for_request(api_key, provider)
+    """OpenAI-compatible client, or None for mock / Anthropic-only / unconfigured."""
+    client = get_llm_for_request(api_key, provider, routing=routing)
     if client is None or client.is_mock or client.provider != "openai":
         return None
     return client
 
 
-def _from_env() -> Optional[LlmClient]:
+def _use_on_prem_env(routing: LlmChatRouting | None) -> bool:
+    if routing is None:
+        return True
+    return routing.chat_source == CHAT_SOURCE_ON_PREM
+
+
+def _from_env(*, routing: LlmChatRouting | None) -> Optional[LlmClient]:
     settings = get_settings()
     if settings.dhara_llm_provider == "mock":
         return _mock_client()
+    if routing is not None and routing.chat_source == CHAT_SOURCE_CLOUD:
+        return None
+    if not _use_on_prem_env(routing):
+        return None
     if settings.dhara_llm_base_url and settings.dhara_llm_model:
+        model = (routing.on_prem_model if routing else None) or settings.dhara_llm_model
         return LlmClient(
             LlmProfile(
                 kind="on-prem",
                 provider="openai",
-                model=settings.dhara_llm_model,
+                model=model.strip(),
                 api_key=settings.dhara_llm_api_key or "local",
                 base_url=normalize_openai_base_url(settings.dhara_llm_base_url),
             )
@@ -97,7 +131,6 @@ def _from_user_key(key: Optional[str], provider: Optional[str]) -> Optional[LlmC
                 base_url=None,
             )
         )
-    # openai, self-hosted (MEITY), or unknown: OpenAI SDK, default host, no stored base_url.
     return LlmClient(
         LlmProfile(
             kind="cloud",

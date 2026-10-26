@@ -14,7 +14,10 @@ from app.core import security
 from app.db.repositories import organisations as org_repo
 from app.db.repositories import users as user_repo
 from app.db.session import get_db
+from app.db.repositories import llm_keys as llm_repo
 from app.services.credentials import service as credentials_service
+from app.services.llm.factory import chat_ready
+from app.services.llm.routing import LlmChatRouting
 
 bearer_scheme = HTTPBearer(
     auto_error=False, bearerFormat="JWT", scheme_name="BearerAuth"
@@ -89,6 +92,20 @@ def resolve_llm_credentials(
         session.close()
 
 
+def llm_routing_for_user(db: Session, user_email: str) -> LlmChatRouting:
+    return llm_repo.get_routing(db, user_email)
+
+
+def chat_ready_for_user(
+    db: Session,
+    user_email: str,
+    api_key: Optional[str],
+    provider: Optional[str],
+) -> bool:
+    routing = llm_routing_for_user(db, user_email)
+    return chat_ready(api_key, provider, routing=routing)
+
+
 def _extractor_for(
     request: Request,
     user_email: str,
@@ -96,11 +113,25 @@ def _extractor_for(
 ):
     from app.services.ingestion.wizard.extractor import TableExtractor
 
-    from app.services.llm.factory import chat_ready
-
     key, provider = resolve_llm_credentials(request, user_email, db=db)
-    # On-prem env counts as configured even when the user has no Settings key.
-    return TableExtractor(api_key=key, skip_llm=not chat_ready(key, provider), provider=provider)
+    if db is None:
+        from app.db.session import get_session_factory
+
+        session = get_session_factory()()
+        try:
+            routing = llm_routing_for_user(session, user_email)
+            ready = chat_ready(key, provider, routing=routing)
+        finally:
+            session.close()
+    else:
+        routing = llm_routing_for_user(db, user_email)
+        ready = chat_ready(key, provider, routing=routing)
+    return TableExtractor(
+        api_key=key,
+        skip_llm=not ready,
+        provider=provider,
+        routing=routing,
+    )
 
 
 __all__ = [

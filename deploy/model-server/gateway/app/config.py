@@ -8,10 +8,23 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _clean(name: str) -> str:
     return (os.getenv(name) or "").strip().rstrip("/")
+
+
+def _default_llm_upstream(model: str) -> str:
+    """Compose uses ``http://llm:8003``; host-run gateway uses localhost."""
+    if not model:
+        return ""
+    explicit = _clean("LLM_UPSTREAM")
+    if explicit:
+        return explicit
+    if Path("/.dockerenv").exists():
+        return "http://llm:8003"
+    return "http://127.0.0.1:8003"
 
 
 @dataclass(frozen=True)
@@ -61,7 +74,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         model = _clean("LLM_MODEL")
-        url = _clean("LLM_UPSTREAM") or ("http://llm:8003" if model else "")
+        url = _default_llm_upstream(model)
         primary = Upstream(url, model)
         locals_list = [primary] if primary.enabled else []
         seen = {primary.model} if primary.enabled else set()

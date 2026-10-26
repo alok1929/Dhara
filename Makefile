@@ -1,13 +1,26 @@
 COMPOSE ?= docker compose
+# Podman on shared hosts (alternate ports): podman-compose -f docker-compose.podman.yml
+COMPOSE_PODMAN ?= podman-compose -f docker-compose.podman.yml
 .DEFAULT_GOAL := help
 
 # Local URLs (override if you change ports in docker-compose.yml)
 FRONTEND_URL ?= http://localhost:80
 BACKEND_URL  ?= http://localhost:8000
+PODMAN_BACKEND_URL ?= http://localhost:8010
+PODMAN_FRONTEND_URL ?= http://localhost:8088
 PROD_URL     ?= http://localhost:80
 API_DOCS     ?= $(BACKEND_URL)/docs
 
-.PHONY: help urls up down logs build restart ps psql postgres migrate prod prod-down clean
+.PHONY: help urls up down logs build restart ps psql postgres migrate prod prod-down clean podman-up podman-down podman-migrate
+
+podman-up: ## Start stack via Podman (API :8010, UI :8088, Postgres :5434)
+	@./scripts/start_dhara_podman.sh
+
+podman-down: ## Stop Podman stack
+	$(COMPOSE_PODMAN) down
+
+podman-migrate: ## Alembic migrate (Podman backend)
+	$(COMPOSE_PODMAN) exec backend alembic upgrade head
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)

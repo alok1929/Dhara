@@ -224,17 +224,35 @@ def _run_extraction_job(
             tmp.write(file_bytes)
             tmp_path = pathlib.Path(tmp.name)
         display_filename = None
+        user_email = None
         with _pdf_jobs_lock:
             live = _pdf_jobs.get(job_id)
             if live:
                 display_filename = live.get("filename")
-        result = run_upload_pipeline(
-            tmp_path,
-            source_type,
-            api_key=resolved_key,
-            on_progress=on_progress,
-            display_filename=display_filename,
-        )
+                user_email = live.get("user_email")
+        routing = None
+        if user_email:
+            from app.db.repositories import llm_keys as llm_repo
+            from app.services.llm.routing import llm_routing_scope
+
+            with session_scope() as session:
+                routing = llm_repo.get_routing(session, user_email)
+            with llm_routing_scope(routing):
+                result = run_upload_pipeline(
+                    tmp_path,
+                    source_type,
+                    api_key=resolved_key,
+                    on_progress=on_progress,
+                    display_filename=display_filename,
+                )
+        else:
+            result = run_upload_pipeline(
+                tmp_path,
+                source_type,
+                api_key=resolved_key,
+                on_progress=on_progress,
+                display_filename=display_filename,
+            )
         with _pdf_jobs_lock:
             job = _pdf_jobs.get(job_id)
             if job is not None:

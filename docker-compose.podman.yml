@@ -1,0 +1,96 @@
+# Podman stack on alternate host ports (do not merge with docker-compose.yml — podman-compose appends ports).
+#   podman-compose -f docker-compose.podman.yml up -d --build
+#   API: http://localhost:8010  UI: http://localhost:8088  Postgres: localhost:5434
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: dhara-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dhara
+      POSTGRES_PASSWORD: dhara_local_password
+      POSTGRES_DB: dhara
+    ports:
+      - "5434:5432"
+    volumes:
+      - dhara_pg_data:/var/lib/postgresql/data
+      - ./backend/db/init-pgvector.sql:/docker-entrypoint-initdb.d/01-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dhara -d dhara"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dhara-backend
+    restart: unless-stopped
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 127.0.0.11
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      - "8010:8000"
+    environment:
+      DATABASE_URL: postgresql://dhara:dhara_local_password@postgres:5432/dhara
+      ENABLE_GCS: "false"
+      DHARA_LLM_BASE_URL: http://host.containers.internal:8100
+      DHARA_LLM_MODEL: phi-4-mini-instruct
+      DHARA_LLM_API_KEY: local
+      DHARA_MODEL_CATALOG_PATH: /deploy/model-server/models.yaml
+    env_file:
+      - path: backend/.env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready')\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      - ./backend:/backend
+      - ./deploy/model-server/models.yaml:/deploy/model-server/models.yaml:ro
+    command:
+      [
+        "uvicorn",
+        "main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dhara-frontend
+    restart: unless-stopped
+    ports:
+      - "8088:3000"
+    environment:
+      BACKEND_ORIGIN: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "npm ci && npm run dev"
+
+volumes:
+  dhara_pg_data:
+  frontend_node_modules:

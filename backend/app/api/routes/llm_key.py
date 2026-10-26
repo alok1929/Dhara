@@ -18,6 +18,8 @@ def _status_payload(status: llm_repo.LlmKeyStatus, *, extra: dict | None = None)
         "updated_at": status.updated_at,
         "api_key": status.api_key if status.configured else None,
         "crypto_error": status.crypto_error,
+        "chat_source": status.chat_source,
+        "on_prem_model": status.on_prem_model,
     }
     if extra:
         body.update(extra)
@@ -58,6 +60,30 @@ async def save_llm_key(
         }
     try:
         llm_repo.upsert(db, user.email, api_key, provider)
+    except CredentialCryptoError as e:
+        raise HTTPException(500, str(e)) from e
+    status = llm_repo.get_status(db, user.email)
+    return _status_payload(status, extra={"status": "saved"})
+
+
+@router.post("/api/llm-chat-mode", summary="Choose cloud API key vs on-prem gateway")
+async def save_llm_chat_mode(
+    request: Request,
+    user: CurrentUser = Depends(require_roles(*MUTATING_ROLES)),
+    db: Session = Depends(get_db),
+):
+    data = await request.json()
+    chat_source = (data.get("chat_source") or "").strip().lower()
+    on_prem_model = (data.get("on_prem_model") or "").strip() or None
+    if chat_source not in ("cloud", "on_prem"):
+        raise HTTPException(400, "chat_source must be 'cloud' or 'on_prem'")
+    try:
+        llm_repo.upsert_routing(
+            db,
+            user.email,
+            chat_source=chat_source,
+            on_prem_model=on_prem_model,
+        )
     except CredentialCryptoError as e:
         raise HTTPException(500, str(e)) from e
     status = llm_repo.get_status(db, user.email)

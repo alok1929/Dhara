@@ -6,7 +6,14 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db, require_user_email, resolve_llm_credentials
+from app.api.dependencies import (
+    chat_ready_for_user,
+    get_db,
+    llm_routing_for_user,
+    require_user_email,
+    resolve_llm_credentials,
+)
+from app.services.llm.routing import llm_routing_scope
 
 router = APIRouter()
 
@@ -52,11 +59,13 @@ async def console_ai_search_tables(
     if not prompt:
         raise HTTPException(400, "prompt is required")
 
-    from app.services.llm.factory import chat_ready
-
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
-    if not chat_ready(api_key, _provider):
-        raise HTTPException(400, "Save an LLM API key in Settings before using AI search")
+    if not chat_ready_for_user(db, user_email, api_key, _provider):
+        raise HTTPException(
+            400,
+            "Configure LLM in Settings (cloud API key or on-prem model) before using AI search",
+        )
+    routing = llm_routing_for_user(db, user_email)
 
     tables_raw = body.get("tables")
     if not isinstance(tables_raw, list):
@@ -77,11 +86,12 @@ async def console_ai_search_tables(
             "rationale": "No tables are available.",
         }
 
-    result = suggest_tables_from_prompt(
-        prompt=prompt,
-        tables=[{"table_id": c["table_id"], **c} for c in catalog],
-        api_key=api_key,
-    )
+    with llm_routing_scope(routing):
+        result = suggest_tables_from_prompt(
+            prompt=prompt,
+            tables=[{"table_id": c["table_id"], **c} for c in catalog],
+            api_key=api_key,
+        )
     return result
 
 
@@ -105,11 +115,13 @@ async def console_ai_chat_tables(
     if not prompt:
         raise HTTPException(400, "prompt is required")
 
-    from app.services.llm.factory import chat_ready
-
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
-    if not chat_ready(api_key, _provider):
-        raise HTTPException(400, "Save an LLM API key in Settings before using chat")
+    if not chat_ready_for_user(db, user_email, api_key, _provider):
+        raise HTTPException(
+            400,
+            "Configure LLM in Settings (cloud API key or on-prem model) before using chat",
+        )
+    routing = llm_routing_for_user(db, user_email)
 
     tables_raw = body.get("tables")
     if not isinstance(tables_raw, list):
@@ -128,12 +140,13 @@ async def console_ai_chat_tables(
         conversation = None
 
     try:
-        return preview_chat_from_prompt(
-            prompt=prompt,
-            tables=[{"table_id": c["table_id"], **c} for c in catalog],
-            api_key=api_key,
-            conversation=conversation,
-        )
+        with llm_routing_scope(routing):
+            return preview_chat_from_prompt(
+                prompt=prompt,
+                tables=[{"table_id": c["table_id"], **c} for c in catalog],
+                api_key=api_key,
+                conversation=conversation,
+            )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:

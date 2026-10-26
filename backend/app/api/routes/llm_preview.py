@@ -8,10 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
     CurrentUser,
+    chat_ready_for_user,
     get_db,
+    llm_routing_for_user,
     require_user,
     resolve_llm_credentials,
 )
+from app.services.llm.routing import llm_routing_scope
 from app.services.llm_preview import (
     build_llm_preview_catalog,
     execute_action_plan,
@@ -61,12 +64,17 @@ def _sync_deletes_to_postgres(job_id: str, table_ids: list[str]) -> None:
 
 
 def _require_api_key(request: Request, user: CurrentUser, db: Session) -> str:
-    from app.services.llm.factory import chat_ready
-
     api_key, provider = resolve_llm_credentials(request, user.email, db=db)
-    if not chat_ready(api_key, provider):
-        raise HTTPException(400, "Save an LLM API key in Settings before using llm_preview")
+    if not chat_ready_for_user(db, user.email, api_key, provider):
+        raise HTTPException(
+            400,
+            "Configure LLM in Settings (cloud API key or on-prem model) before using llm_preview",
+        )
     return (api_key or "").strip()
+
+
+def _routing_scope_for_user(db: Session, user: CurrentUser):
+    return llm_routing_scope(llm_routing_for_user(db, user.email))
 
 
 @router.post("/api/llm_preview/jobs/{job_id}/llm_preview_data")
@@ -108,15 +116,16 @@ async def post_llm_preview_data(
         overlay_client_tables(tables, body.get("tables"))
 
     try:
-        if force_summarize:
-            catalog = await asyncio.to_thread(
-                build_llm_preview_catalog,
-                tables,
-                force_summarize=True,
-                api_key=api_key,
-            )
-        else:
-            catalog = build_llm_preview_catalog(tables, force_summarize=False)
+        with _routing_scope_for_user(db, user):
+            if force_summarize:
+                catalog = await asyncio.to_thread(
+                    build_llm_preview_catalog,
+                    tables,
+                    force_summarize=True,
+                    api_key=api_key,
+                )
+            else:
+                catalog = build_llm_preview_catalog(tables, force_summarize=False)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:
@@ -308,49 +317,50 @@ async def _handle_llm_input(
         if persisted_for_grouping:
             tables = persisted_for_grouping
 
-    if needs_catalog:
+    with _routing_scope_for_user(db, user):
+        if needs_catalog:
+            try:
+                if force_summarize:
+                    catalog = await asyncio.to_thread(
+                        build_llm_preview_catalog,
+                        tables,
+                        force_summarize=True,
+                        api_key=api_key,
+                    )
+                else:
+                    catalog = (
+                        grouping_catalog_from_tables(tables)
+                        if stage == "grouping"
+                        else build_llm_preview_catalog(tables, force_summarize=False)
+                    )
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            except Exception as e:
+                raise HTTPException(502, f"Could not build llm_preview catalog: {e}") from e
+
+            with _pdf_jobs_lock:
+                job = _get_pdf_job(job_id)
+                if not job_visible_to(job, user):
+                    raise HTTPException(404, "Job not found")
+                set_llm_preview_catalog(job, catalog, source_table_count=len(tables))
+                _save_pdf_job(job)
+        else:
+            assert catalog is not None
+
         try:
-            if force_summarize:
-                catalog = await asyncio.to_thread(
-                    build_llm_preview_catalog,
-                    tables,
-                    force_summarize=True,
-                    api_key=api_key,
-                )
-            else:
-                catalog = (
-                    grouping_catalog_from_tables(tables)
-                    if stage == "grouping"
-                    else build_llm_preview_catalog(tables, force_summarize=False)
-                )
+            plan = await asyncio.to_thread(
+                plan_from_user_request,
+                user_request=user_request,
+                catalog=catalog,
+                api_key=api_key,
+                prompt=prompt,
+                stage=stage,
+                groups=groups_context if stage == "grouping" else None,
+            )
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         except Exception as e:
-            raise HTTPException(502, f"Could not build llm_preview catalog: {e}") from e
-
-        with _pdf_jobs_lock:
-            job = _get_pdf_job(job_id)
-            if not job_visible_to(job, user):
-                raise HTTPException(404, "Job not found")
-            set_llm_preview_catalog(job, catalog, source_table_count=len(tables))
-            _save_pdf_job(job)
-    else:
-        assert catalog is not None
-
-    try:
-        plan = await asyncio.to_thread(
-            plan_from_user_request,
-            user_request=user_request,
-            catalog=catalog,
-            api_key=api_key,
-            prompt=prompt,
-            stage=stage,
-            groups=groups_context if stage == "grouping" else None,
-        )
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-    except Exception as e:
-        raise HTTPException(502, f"Could not run llm_input: {e}") from e
+            raise HTTPException(502, f"Could not run llm_input: {e}") from e
 
     # Re-load live tables after intent so concurrent deletes are reflected.
     with _pdf_jobs_lock:

@@ -2,6 +2,7 @@
 
 from app.services.llm.factory import (
     chat_ready,
+    chat_ready_for_user,
     get_llm_for_request,
     get_llm_for_user,
     live_openai_chat,

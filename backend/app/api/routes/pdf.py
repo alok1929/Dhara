@@ -17,11 +17,14 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
     CurrentUser,
+    chat_ready_for_user,
     get_db,
+    llm_routing_for_user,
     require_user,
     require_user_email,
     resolve_llm_credentials,
 )
+from app.services.llm.routing import llm_routing_scope
 from app.db.session import session_scope
 from app.workers.extraction_jobs import (
     _get_pdf_job,
@@ -276,11 +279,13 @@ async def pdf_ai_search_tables(
     if not prompt:
         raise HTTPException(400, "prompt is required")
 
-    from app.services.llm.factory import chat_ready
-
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
-    if not chat_ready(api_key, _provider):
-        raise HTTPException(400, "Save an LLM API key in Settings before using AI search")
+    if not chat_ready_for_user(db, user_email, api_key, _provider):
+        raise HTTPException(
+            400,
+            "Configure LLM in Settings (cloud API key or on-prem model) before using AI search",
+        )
+    routing = llm_routing_for_user(db, user_email)
 
     with _pdf_jobs_lock:
         job = _get_pdf_job(job_id)
@@ -307,12 +312,13 @@ async def pdf_ai_search_tables(
                     t[key] = override.get(key)
 
     try:
-        result = await asyncio.to_thread(
-            suggest_tables_from_prompt,
-            prompt=prompt,
-            tables=tables,
-            api_key=api_key,
-        )
+        with llm_routing_scope(routing):
+            result = await asyncio.to_thread(
+                suggest_tables_from_prompt,
+                prompt=prompt,
+                tables=tables,
+                api_key=api_key,
+            )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:
@@ -341,11 +347,13 @@ async def pdf_ai_chat_tables(
     if not prompt:
         raise HTTPException(400, "prompt is required")
 
-    from app.services.llm.factory import chat_ready
-
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
-    if not chat_ready(api_key, _provider):
-        raise HTTPException(400, "Save an LLM API key in Settings before using chat")
+    if not chat_ready_for_user(db, user_email, api_key, _provider):
+        raise HTTPException(
+            400,
+            "Configure LLM in Settings (cloud API key or on-prem model) before using chat",
+        )
+    routing = llm_routing_for_user(db, user_email)
 
     with _pdf_jobs_lock:
         job = _get_pdf_job(job_id)
@@ -375,13 +383,14 @@ async def pdf_ai_chat_tables(
         conversation = None
 
     try:
-        result = await asyncio.to_thread(
-            preview_chat_from_prompt,
-            prompt=prompt,
-            tables=tables,
-            api_key=api_key,
-            conversation=conversation,
-        )
+        with llm_routing_scope(routing):
+            result = await asyncio.to_thread(
+                preview_chat_from_prompt,
+                prompt=prompt,
+                tables=tables,
+                api_key=api_key,
+                conversation=conversation,
+            )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:
@@ -630,6 +639,7 @@ async def pdf_persist_approved(
     from app.services.grouping import pdf_grouping
 
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
+    routing = llm_routing_for_user(db, user_email)
     body = {}
     try:
         body = await request.json()
@@ -684,9 +694,10 @@ async def pdf_persist_approved(
             filename=filename,
             tables=tables,
         )
-        proposal = pdf_grouping.propose_groups(
-            session, job_id, api_key=api_key, reindex=True
-        )
+        with llm_routing_scope(routing):
+            proposal = pdf_grouping.propose_groups(
+                session, job_id, api_key=api_key, reindex=True
+            )
         grouping = pdf_grouping.apply_proposal_to_db(session, job_id, proposal)
         return {
             "ok": True,
@@ -732,6 +743,7 @@ async def pdf_propose_grouping(
     from app.services.grouping import pdf_grouping
 
     api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
+    routing = llm_routing_for_user(db, user_email)
     body = {}
     try:
         body = await request.json()
@@ -743,9 +755,10 @@ async def pdf_propose_grouping(
         job_row = pdf_store.get_job(session, job_id)
         if not job_row or job_row.get("user_email") != user_email:
             raise HTTPException(404, "Job not found — continue from Preview first.")
-        proposal = pdf_grouping.propose_groups(
-            session, job_id, api_key=api_key, reindex=reindex
-        )
+        with llm_routing_scope(routing):
+            proposal = pdf_grouping.propose_groups(
+                session, job_id, api_key=api_key, reindex=reindex
+            )
         grouping = pdf_grouping.apply_proposal_to_db(session, job_id, proposal)
         return {"ok": True, "job_id": job_id, **grouping}
 

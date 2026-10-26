@@ -111,6 +111,8 @@ class LlmApiKey(Base):
     user_email: Mapped[str] = mapped_column(Text, primary_key=True)
     provider: Mapped[str | None] = mapped_column(Text)
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    chat_source: Mapped[str] = mapped_column(Text, nullable=False, server_default="cloud")
+    on_prem_model: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

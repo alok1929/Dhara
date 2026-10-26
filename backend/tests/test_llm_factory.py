@@ -97,6 +97,7 @@ def test_get_llm_for_user_onprem_skips_db(fresh_settings, monkeypatch):
     monkeypatch.setenv("DHARA_LLM_BASE_URL", "http://gw:8100")
     monkeypatch.setenv("DHARA_LLM_MODEL", "gemma-3-4b")
     from app.core.config import clear_settings_cache
+    from app.services.llm.routing import LlmChatRouting
 
     clear_settings_cache()
     from app.services.llm import factory
@@ -105,8 +106,35 @@ def test_get_llm_for_user_onprem_skips_db(fresh_settings, monkeypatch):
         raise AssertionError("user key must not be read when on-prem env is set")
 
     monkeypatch.setattr(factory.credentials_service, "resolve_for_user", _boom)
+    monkeypatch.setattr(
+        "app.db.repositories.llm_keys.get_routing",
+        lambda *_a, **_k: LlmChatRouting(chat_source="on_prem", on_prem_model="gemma-3-4b"),
+    )
     client = factory.get_llm_for_user(MagicMock(), "u@example.com")
     assert client is not None and client.is_on_prem
+
+
+def test_get_llm_for_user_cloud_ignores_onprem_env(fresh_settings, monkeypatch):
+    monkeypatch.setenv("DHARA_LLM_BASE_URL", "http://gw:8100")
+    monkeypatch.setenv("DHARA_LLM_MODEL", "gemma-3-4b")
+    from app.core.config import clear_settings_cache
+    from app.services.llm.routing import LlmChatRouting
+
+    clear_settings_cache()
+    from app.services.llm import factory
+
+    monkeypatch.setattr(
+        "app.db.repositories.llm_keys.get_routing",
+        lambda *_a, **_k: LlmChatRouting(chat_source="cloud"),
+    )
+    monkeypatch.setattr(
+        factory.credentials_service,
+        "resolve_for_user",
+        lambda *_a, **_k: ("sk-user", "openai"),
+    )
+    client = factory.get_llm_for_user(MagicMock(), "u@example.com")
+    assert client is not None
+    assert client.kind == "cloud"
 
 
 def test_json_salvage_logs_onprem_profile(fresh_settings, monkeypatch, caplog):

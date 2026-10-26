@@ -7,6 +7,7 @@ from app.api.routes import catalogue as routes_catalogue
 from app.api.routes import dashboard as routes_dashboard
 from app.api.routes import health as routes_health
 from app.api.routes import kyds as routes_kyds
+from app.api.routes import llm_catalog as routes_llm_catalog
 from app.api.routes import llm_key as routes_llm_key
 from app.api.routes import llm_preview as routes_llm_preview
 from app.api.routes import pdf as routes_pdf
@@ -19,6 +20,7 @@ api_router.include_router(routes_health.router)
 api_router.include_router(routes_auth.router)
 api_router.include_router(routes_kyds.router)
 api_router.include_router(routes_llm_key.router)
+api_router.include_router(routes_llm_catalog.router)
 api_router.include_router(routes_catalogue.router)
 api_router.include_router(routes_pdf.router)
 api_router.include_router(routes_llm_preview.router)

@@ -197,7 +197,13 @@ def _extract_json_with_key(text: str, required_key: str) -> Optional[Dict]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TableExtractor:
-    def __init__(self, api_key: Optional[str] = None, skip_llm: bool = False, provider: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        skip_llm: bool = False,
+        provider: Optional[str] = None,
+        routing=None,
+    ):
         self.model = OPENAI_MODEL
         self.llm = None
         self.embed_client = None
@@ -212,7 +218,7 @@ class TableExtractor:
 
         from app.services.llm.factory import get_llm_for_request
 
-        llm = get_llm_for_request(api_key, provider)
+        llm = get_llm_for_request(api_key, provider, routing=routing)
         if llm is None or llm.is_mock:
             self.skip_llm = True
             self.provider = "mock" if llm is not None else (provider or _detect_provider(api_key))

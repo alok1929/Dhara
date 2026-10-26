@@ -24,13 +24,20 @@ type LoginData = {
   role?: string
 }
 
-type Settings = { provider: string; apiKey: string }
+type Settings = {
+  provider: string
+  apiKey: string
+  chatSource: 'cloud' | 'on_prem'
+  onPremModel: string
+}
 
 type LlmKeyStatus = {
   configured: boolean
   provider: string
   apiKey: string
   cryptoError: boolean
+  chatSource: 'cloud' | 'on_prem'
+  onPremModel: string
 }
 
 type AppContextValue = {
@@ -73,11 +80,14 @@ async function fetchLlmKeyStatus(): Promise<LlmKeyStatus | null> {
   const res = await fetch('/api/llm-key', withAuthHeaders())
   if (!res.ok) return null
   const data = await res.json()
+  const chatRaw = String(data.chat_source || 'cloud').toLowerCase()
   return {
     configured: Boolean(data.configured),
     provider: normalizeProvider(String(data.provider || 'openai')),
     apiKey: typeof data.api_key === 'string' ? data.api_key : '',
     cryptoError: Boolean(data.crypto_error),
+    chatSource: chatRaw === 'on_prem' ? 'on_prem' : 'cloud',
+    onPremModel: typeof data.on_prem_model === 'string' ? data.on_prem_model : '',
   }
 }
 
@@ -88,7 +98,12 @@ function applyLlmStatus(
   setLlmCryptoError: (v: boolean) => void,
 ) {
   setLlmProvider(status.provider)
-  setSettings({ provider: status.provider, apiKey: status.apiKey })
+  setSettings({
+    provider: status.provider,
+    apiKey: status.apiKey,
+    chatSource: status.chatSource,
+    onPremModel: status.onPremModel,
+  })
   setKeySaved(status.configured)
   setLlmCryptoError(status.cryptoError)
 }
@@ -98,7 +113,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [loggedIn, setLoggedIn] = useState(false)
   const [user, setUser] = useState<StoredUser>(EMPTY_USER)
   const [showKyds, setShowKyds] = useState(false)
-  const [settings, setSettings] = useState<Settings>({ provider: 'openai', apiKey: '' })
+  const [settings, setSettings] = useState<Settings>({
+    provider: 'openai',
+    apiKey: '',
+    chatSource: 'cloud',
+    onPremModel: '',
+  })
   const [keySaved, setKeySaved] = useState(false)
   const [llmCryptoError, setLlmCryptoError] = useState(false)
 
@@ -108,7 +128,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     async function restoreSession() {
       const cachedProvider = normalizeProvider(getLlmProvider() || 'openai')
-      setSettings({ provider: cachedProvider, apiKey: '' })
+      setSettings({
+        provider: cachedProvider,
+        apiKey: '',
+        chatSource: 'cloud',
+        onPremModel: '',
+      })
 
       const token = getToken()
       const storedUser = getStoredUser()
@@ -188,7 +213,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           applyLlmStatus(status, setSettings, setKeySaved, setLlmCryptoError)
         } else {
           setLlmProvider(provider)
-          setSettings({ provider, apiKey: key })
+          setSettings((prev) => ({ ...prev, provider, apiKey: key }))
           setKeySaved(Boolean(key))
           setLlmCryptoError(false)
         }
@@ -221,7 +246,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     clearSession()
     clearLegacyLlmKeyStorage()
     setLlmProvider('')
-    setSettings({ provider: 'openai', apiKey: '' })
+    setSettings({ provider: 'openai', apiKey: '', chatSource: 'cloud', onPremModel: '' })
     setKeySaved(false)
     setLlmCryptoError(false)
     setLoggedIn(false)
