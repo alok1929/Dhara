@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
 
+from app.services.llm.chat_commands import lines_from_tables, match_stage_command, run_stage_command
 from app.services.llm_prompts import (
     LLM_GROUPING_INTENT_EXTRA,
     LLM_PREVIEW_INTENT_HUMAN_PROMPT,
@@ -51,6 +52,20 @@ def plan_from_user_request(
     llm_client = live_openai_chat(api_key)
     if llm_client is None:
         raise ValueError("An LLM API key is required in Settings")
+
+    if match_stage_command(text):
+        answered = run_stage_command(
+            command=text,
+            lines=lines_from_tables(catalog, groups),
+            api_key=api_key,
+        )
+        action = str(answered.get("action") or "none")
+        ids = list(answered.get("table_ids") or []) if action == "find" else []
+        return normalize_action_plan(LlmActionPlan(
+            type=LlmActionType.find,
+            table_names=ids,
+            rationale=str(answered.get("reply") or "").strip() or "Done.",
+        ))
 
     valid_ids = {
         str(c.get("table_id") or "").strip()

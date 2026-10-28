@@ -182,8 +182,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const handleSettingsChange = (next: Settings) => {
-    setSettings(next)
-    if (next.apiKey) setKeySaved(false)
+    setSettings((prev) => {
+      // Editing the key marks it unsaved. Saving chat mode resends the same
+      // key and must not clear a key that is already stored.
+      if (next.apiKey && next.apiKey !== prev.apiKey) setKeySaved(false)
+      return next
+    })
     setLlmCryptoError(false)
   }
 

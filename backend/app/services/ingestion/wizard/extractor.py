@@ -1,4 +1,3 @@
-import concurrent.futures
 import io
 import json
 import re
@@ -240,27 +239,30 @@ class TableExtractor:
 
     def extract_from_file(self, file_content: bytes, filename: str) -> List[Dict]:
         try:
-            wb = openpyxl.load_workbook(io.BytesIO(file_content), data_only=True)
+            # data_only reads cached values. A second pass keeps sheets whose
+            # cells were stored as literals when the cache is empty.
+            wb_values = openpyxl.load_workbook(io.BytesIO(file_content), data_only=True)
+            wb_raw = openpyxl.load_workbook(io.BytesIO(file_content), data_only=False)
         except Exception as e:
             raise ValueError(f"Cannot open Excel file: {e}")
 
-        # Process sheets concurrently -- each sheet is 1+ independent LLM calls,
-        # and a large workbook (e.g. 36 sheets) run sequentially is the main
-        # source of slowness. Capped at 5 workers to stay well under Anthropic
-        # rate limits; _call_with_retry still backs off if we hit them anyway.
-        sheets = [(name, wb[name]) for name in wb.sheetnames]
-        results_by_sheet: List[List[Dict]] = [[] for _ in sheets]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-            future_to_idx = {
-                pool.submit(self._process_sheet, ws, name, filename): i
-                for i, (name, ws) in enumerate(sheets)
-            }
-            for future in concurrent.futures.as_completed(future_to_idx):
-                results_by_sheet[future_to_idx[future]] = future.result()
-
+        # Read every sheet on this thread. openpyxl workbooks are not safe to
+        # share across threads, which was dropping all but one sheet.
         all_tables: List[Dict] = []
-        for tables in results_by_sheet:
-            all_tables.extend(tables)
+        try:
+            for name in wb_values.sheetnames:
+                ws = wb_values[name]
+                if not hasattr(ws, "iter_rows"):
+                    continue
+                ws_raw = wb_raw[name] if name in wb_raw.sheetnames else None
+                grid = self._filled_grid(ws, ws_raw)
+                try:
+                    all_tables.extend(self._tables_from_grid(grid, name, filename))
+                except Exception as e:
+                    print(f"[{name}] sheet extract failed: {e}")
+        finally:
+            wb_values.close()
+            wb_raw.close()
 
         # Generate DDI-format table ID from raw header rows.
         # Format: DDI_DEL_DES_VS_{TABLECODE}_{TOPLEVEL}[_{NEXTLEVEL}]_2024_V1
@@ -292,8 +294,14 @@ class TableExtractor:
 
     # ── Sheet processing ──────────────────────────────────────────────────────
 
-    def _process_sheet(self, ws, sheet_name: str, filename: str) -> List[Dict]:
-        grid = self._filled_grid(ws)
+    def _prefer_heuristic_structure(self) -> bool:
+        """The small on-prem model mis-reads sheet structure and drops sheets."""
+        if self.skip_llm:
+            return True
+        llm = getattr(self, "llm", None)
+        return bool(llm is not None and getattr(llm, "is_on_prem", False))
+
+    def _tables_from_grid(self, grid, sheet_name: str, filename: str) -> List[Dict]:
         if not grid:
             return []
 
@@ -310,13 +318,27 @@ class TableExtractor:
                 print(f"[{sheet_name}] block {start}-{end} error: {e}")
             # This pause only exists to stay under Anthropic rate limits between
             # per-block LLM calls -- skip it entirely when there are none.
-            if not self.skip_llm and idx < len(blocks) - 1:
+            if not self._prefer_heuristic_structure() and idx < len(blocks) - 1:
                 time.sleep(3)
         return results
 
+    def _process_sheet(self, ws, sheet_name: str, filename: str) -> List[Dict]:
+        return self._tables_from_grid(self._filled_grid(ws), sheet_name, filename)
+
     # ── Grid builder ──────────────────────────────────────────────────────────
 
-    def _filled_grid(self, ws) -> List[List[Any]]:
+    @staticmethod
+    def _cell_present(value: Any) -> bool:
+        return value is not None and str(value).strip() != ""
+
+    def _prefer_cell(self, cached: Any, raw: Any) -> Any:
+        if self._cell_present(cached):
+            return cached
+        if isinstance(raw, str) and raw.startswith("="):
+            return cached
+        return raw if raw is not None else cached
+
+    def _merge_lookup(self, ws) -> Dict[Tuple[int, int], Any]:
         merge_lookup: Dict[Tuple[int, int], Any] = {}
         for mrng in ws.merged_cells.ranges:
             master = ws.cell(mrng.min_row, mrng.min_col).value
@@ -324,21 +346,42 @@ class TableExtractor:
                 for c in range(mrng.min_col, mrng.max_col + 1):
                     if r != mrng.min_row or c != mrng.min_col:
                         merge_lookup[(r, c)] = master
+        return merge_lookup
+
+    def _filled_grid(self, ws, ws_raw=None) -> List[List[Any]]:
+        merge_lookup = self._merge_lookup(ws)
+        raw_lookup = self._merge_lookup(ws_raw) if ws_raw is not None else {}
+
+        def at(sheet, lookup, r, c):
+            if (r, c) in lookup:
+                return lookup[(r, c)]
+            return sheet.cell(r, c).value
 
         max_row = max_col = 0
-        for row in ws.iter_rows():
-            for cell in row:
-                v = merge_lookup.get((cell.row, cell.column), cell.value)
-                if v is not None and str(v).strip():
-                    max_row = max(max_row, cell.row)
-                    max_col = max(max_col, cell.column)
+        sheets = [(ws, merge_lookup)]
+        if ws_raw is not None:
+            sheets.append((ws_raw, raw_lookup))
+        for sheet, lookup in sheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    v = lookup.get((cell.row, cell.column), cell.value)
+                    if isinstance(v, str) and v.startswith("="):
+                        continue
+                    if self._cell_present(v):
+                        max_row = max(max_row, cell.row)
+                        max_col = max(max_col, cell.column)
 
         if not max_row:
             return []
-        return [
-            [merge_lookup.get((r, c), ws.cell(r, c).value) for c in range(1, max_col + 1)]
-            for r in range(1, max_row + 1)
-        ]
+        grid = []
+        for r in range(1, max_row + 1):
+            row_vals = []
+            for c in range(1, max_col + 1):
+                cached = at(ws, merge_lookup, r, c)
+                raw = at(ws_raw, raw_lookup, r, c) if ws_raw is not None else None
+                row_vals.append(self._prefer_cell(cached, raw))
+            grid.append(row_vals)
+        return grid
 
     # ── Block detection ───────────────────────────────────────────────────────
 
@@ -506,7 +549,7 @@ class TableExtractor:
 
         n_cols = max(len(r) for r in body)
 
-        if self.skip_llm:
+        if self._prefer_heuristic_structure():
             structure = self._heuristic_structure(body, n_cols)
         else:
             try:

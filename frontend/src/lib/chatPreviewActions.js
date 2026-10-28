@@ -50,8 +50,10 @@ export function rowsFromMatchedTables(tables, ids, { pdfJob = false } = {}) {
   const idSet = new Set((ids || []).map(String))
   return (tables || [])
     .filter((t) => {
-      const tid = String(pdfJob ? (t.table_id ?? t._uid) : (t._uid ?? t.table_id))
-      return idSet.has(tid)
+      const candidates = pdfJob
+        ? [t?.table_id, t?._uid, t?.id]
+        : [t?._uid, t?.table_id, t?.id]
+      return candidates.some((value) => value != null && value !== '' && idSet.has(String(value)))
     })
     .map((t) => normalizePreviewTableRow(t, { pdfJob }))
     .filter(Boolean)

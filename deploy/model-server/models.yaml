@@ -13,19 +13,21 @@ llm:
     parameters: 3.8B
     context: 16384
     notes: >-
-      Text chat for Dhara. Weights stay in the vLLM container. First start
-      downloads into the hf_cache volume. Native context is longer; 16384
-      fits a 20 GB GPU.
+      Text chat for Dhara. 3.8B, under 5B. Profile llm-cpu also starts it
+      in dhara-model-phi-4-mini with context 8192. The GPU recipe in the
+      same folder keeps the native 16384 context. Choose it in Settings.
 
   - id: gemma-3-4b
     name: Gemma 3 4B Instruct
     status: ready
     runtime: vllm
     huggingface: google/gemma-3-4b-it
+    parameters: 4B
     context: 32768
     notes: >-
-      Alternate checkpoint. Set LLM_MODEL=gemma-3-4b and rebuild the llm
-      service. DHARA_LLM_MODEL must use the same id.
+      4B, under 5B. Profile llm-cpu starts it in dhara-model-gemma-3-4b
+      with context 8192. The GPU recipe in the same folder keeps the
+      native 32768 context. Choose it in Settings.
 
   - id: gemma-2-2b-it
     name: Gemma 2 2B Instruct
@@ -40,6 +42,49 @@ llm:
       profile llm-cpu (the vLLM CPU image). Do not enable the llm profile,
       which reserves an NVIDIA GPU. Native context is 8192. Set
       LLM_MODEL=gemma-2-2b-it. DHARA_LLM_MODEL must use the same id.
+
+  - id: bitnet-b1.58-2b
+    name: BitNet b1.58 2B
+    status: ready
+    runtime: bitnet
+    device: cpu
+    huggingface: microsoft/BitNet-b1.58-2B-4T-gguf
+    parameters: 2.4B
+    context: 4096
+    notes: >-
+      Microsoft BitNet b1.58 2B 4T, ternary I2_S GGUF
+      (ggml-model-i2_s.gguf, about 1.2 GB), served by bitnet.cpp
+      llama-server. Profile llm-cpu starts this beside Gemma. Native
+      context is 4096.       The gateway routes id bitnet-b1.58-2b to container
+      dhara-model-bitnet. Choose it in Settings; Gemma stays loaded.
+
+  - id: phi-2
+    name: Phi-2 2.7B
+    status: ready
+    runtime: vllm
+    device: cpu
+    huggingface: microsoft/phi-2
+    parameters: 2.7B
+    context: 2048
+    notes: >-
+      Microsoft Phi-2, 2.7B, on the vLLM CPU image. Native context is 2048.
+      Profile llm-cpu starts container dhara-model-phi-2 beside Gemma and
+      BitNet.       The gateway routes id phi-2 to that container. Choose Phi-2
+      2.7B in Settings.
+
+  - id: phi-3-mini-4k-instruct
+    name: Phi-3 Mini 3.8B
+    status: ready
+    runtime: vllm
+    device: cpu
+    huggingface: microsoft/Phi-3-mini-4k-instruct
+    parameters: 3.8B
+    context: 4096
+    notes: >-
+      Microsoft Phi-3 Mini instruct, 3.8B, 4k context, on the vLLM CPU
+      image. Profile llm-cpu starts container dhara-model-phi-3-mini.
+      The gateway routes id phi-3-mini-4k-instruct. Choose Phi-3 Mini
+      3.8B in Settings. Models at or above 5B stay out of this CPU set.
 
   - id: gemma-2-9b-it
     name: Gemma 2 9B Instruct

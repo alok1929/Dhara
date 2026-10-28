@@ -8,7 +8,8 @@ export default function ChatComposer({
   onSend,
   disabled,
   loading,
-  placeholder = 'Ask Dhara about your data...',
+  commands = [],
+  placeholder = 'Or type a command...',
 }) {
   const [text, setText] = useState('')
 
@@ -20,7 +21,23 @@ export default function ChatComposer({
   }
 
   return (
-    <div className="flex w-full items-end gap-2 rounded-[28px] border border-line/90 bg-white px-3 py-2 shadow-[0_8px_32px_rgba(18,64,62,0.12)]">
+    <div className="flex w-full flex-col gap-2 rounded-[28px] border border-line/90 bg-white px-3 py-2 shadow-[0_8px_32px_rgba(18,64,62,0.12)]">
+      {commands.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 px-1 pt-1" role="group" aria-label="Commands">
+          {commands.map((command) => (
+            <button
+              key={command}
+              type="button"
+              disabled={disabled || loading}
+              className="rounded-full border border-line bg-sage px-2.5 py-1 text-left text-[12px] font-medium text-ink transition-colors hover:border-teal hover:text-teal disabled:opacity-60"
+              onClick={() => onSend?.(command)}
+            >
+              {command}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex w-full items-end gap-2">
       <textarea
         rows={1}
         value={text}
@@ -46,6 +63,7 @@ export default function ChatComposer({
       >
         <Send className="h-4 w-4" strokeWidth={2} aria-hidden />
       </Button>
+      </div>
     </div>
   )
 }

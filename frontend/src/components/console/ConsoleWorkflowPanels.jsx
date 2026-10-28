@@ -160,33 +160,32 @@ export default function ConsoleWorkflowPanels({
           <div className="flex flex-col gap-6">
             {previewDatasets.length > 1 && (
               <div className="flex flex-wrap items-center gap-2.5">
-                <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft">Dataset</span>
-                {previewDatasets.length > 2 ? (
-                  <select
-                    className="rounded-md border border-line-strong bg-white px-3 py-1.5 text-[13px] text-ink outline-none focus:border-teal"
-                    value={effectiveDataset}
-                    onChange={(e) => selectPreviewDataset(e.target.value)}
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft">Files</span>
+                <div
+                  className={`dhara-tab cursor-pointer rounded-full border px-3 py-1.5 text-sm ${
+                    !effectiveDataset
+                      ? 'border-transparent bg-teal-deep text-cream'
+                      : 'border-line bg-white text-ink hover:bg-sage hover:text-teal-deep'
+                  }`}
+                  onClick={() => selectPreviewDataset(null)}
+                >
+                  All files
+                  <span className="ml-1.5 text-[11px] opacity-80">{previewDatasets.length}</span>
+                </div>
+                {previewDatasets.map((name) => (
+                  <div
+                    key={name}
+                    className={`dhara-tab cursor-pointer rounded-full border px-3 py-1.5 text-sm ${
+                      name === effectiveDataset
+                        ? 'border-transparent bg-teal-deep text-cream'
+                        : 'border-line bg-white text-ink hover:bg-sage hover:text-teal-deep'
+                    }`}
+                    onClick={() => selectPreviewDataset(name)}
+                    title={name}
                   >
-                    {previewDatasets.map((name) => (
-                      <option key={name} value={name}>{name}</option>
-                    ))}
-                  </select>
-                ) : (
-                  previewDatasets.map((name) => (
-                    <div
-                      key={name}
-                      className={`dhara-tab cursor-pointer rounded-full border px-3 py-1.5 text-sm ${
-                        name === effectiveDataset
-                          ? 'border-transparent bg-teal-deep text-cream'
-                          : 'border-line bg-white text-ink hover:bg-sage hover:text-teal-deep'
-                      }`}
-                      onClick={() => selectPreviewDataset(name)}
-                      title={name}
-                    >
-                      {name}
-                    </div>
-                  ))
-                )}
+                    {name}
+                  </div>
+                ))}
               </div>
             )}
 

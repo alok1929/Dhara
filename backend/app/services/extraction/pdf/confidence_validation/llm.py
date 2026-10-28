@@ -10,6 +10,7 @@ import pandas as pd
 import pymupdf
 
 from app.services.llm.base_llm import LlmClient
+from app.services.llm.profiles import gemma_2b_json_response_format
 from app.services.llm.factory import live_openai_chat
 from app.services.llm_prompts import (
     BATCH_SIZE,
@@ -54,13 +55,16 @@ def build_validation_prompt(page_num: int, candidates: List[Dict[str, Any]], tex
 def validate_page(client: LlmClient, page_num: int, candidates: List[Dict[str, Any]], text: str) -> Dict[str, Any]:
     prompt = build_validation_prompt(page_num, candidates, text)
     sdk = client.openai_sdk()
-    resp = sdk.chat.completions.create(
-        model=client.model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=SINGLE_PAGE_MAX_TOKENS,
-        temperature=LLM_VALIDATION_TEMPERATURE,
-    )
+    create_kwargs = {
+        "model": client.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": SINGLE_PAGE_MAX_TOKENS,
+        "temperature": LLM_VALIDATION_TEMPERATURE,
+    }
+    response_format = gemma_2b_json_response_format(client.model)
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
+    resp = sdk.chat.completions.create(**create_kwargs)
     text_out = client.completion_text(resp.choices[0].message)
     return client.loads_json(text_out, context="pdf_validate_page")
 
@@ -127,15 +131,18 @@ def validate_batch(client: LlmClient, pages: List[int], pages_grouped: Dict[int,
                     page_text: Dict[int, str]) -> Dict[int, Dict[str, Any]]:
     prompt = build_batch_validation_prompt(pages, pages_grouped, page_text)
     sdk = client.openai_sdk()
-    resp = sdk.chat.completions.create(
-        model=client.model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=min(
+    create_kwargs = {
+        "model": client.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": min(
             BATCH_VALIDATION_MAX_TOKENS_CAP, MAX_TOKENS_PER_PAGE * len(pages)
         ),
-        temperature=LLM_VALIDATION_TEMPERATURE,
-    )
+        "temperature": LLM_VALIDATION_TEMPERATURE,
+    }
+    response_format = gemma_2b_json_response_format(client.model)
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
+    resp = sdk.chat.completions.create(**create_kwargs)
     text_out = client.completion_text(resp.choices[0].message)
     parsed = client.loads_json(text_out, context="pdf_validate_batch")
 

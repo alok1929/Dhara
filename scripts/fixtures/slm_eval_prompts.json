@@ -1,0 +1,55 @@
+{
+  "description": "Shared prompts for comparing small on-prem models. Add a case here when you want every model scored on the same task.",
+  "cases": [
+    {
+      "id": "count_tables",
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are Dhara. Answer using only the lines below. Never invent an id.\n\nCommand: How many tables?\nCount the table lines. Reply with one sentence that states the count. action is none and table_ids is empty.\n\nLines:\ntable | T1 | Births | review=no | description=yes\ntable | T2 | Deaths | review=yes | description=no\ntable | T3 | Infant | review=no | description=yes\n\nReturn only JSON:\n{\"reply\":\"1-2 short sentences\",\"action\":\"none\",\"table_ids\":[]}"
+        }
+      ],
+      "expect": {
+        "json": true,
+        "equals": {"action": "none", "table_ids": []},
+        "reply_contains": ["3"]
+      }
+    },
+    {
+      "id": "tables_need_review",
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are Dhara. Answer using only the lines below. Never invent an id.\n\nCommand: Which tables need review?\nSelect every table line with review=yes. action is find and table_ids lists those ids. If none, action is none and say so.\n\nLines:\ntable | T1 | Births | review=no | description=yes\ntable | T2 | Deaths | review=yes | description=no\ntable | T3 | Infant | review=no | description=yes\n\nReturn only JSON:\n{\"reply\":\"1-2 short sentences\",\"action\":\"none\",\"table_ids\":[]}"
+        }
+      ],
+      "expect": {
+        "json": true,
+        "equals": {"action": "find", "table_ids": ["T2"]},
+        "reply_contains": ["Deaths"]
+      }
+    },
+    {
+      "id": "births_json",
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return only JSON with keys title and rows. Title is Births by sex. Rows are two objects with sex and count: Female 12, Male 9."
+        }
+      ],
+      "expect": {
+        "json": true,
+        "equals": {
+          "title": "Births by sex",
+          "rows": [
+            {"sex": "Female", "count": 12},
+            {"sex": "Male", "count": 9}
+          ]
+        }
+      }
+    }
+  ]
+}

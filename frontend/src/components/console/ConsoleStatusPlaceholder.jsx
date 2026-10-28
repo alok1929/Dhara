@@ -22,7 +22,6 @@ export default function ConsoleStatusPlaceholder({
   const [percent, setPercent] = useState(8)
   const [workDone, setWorkDone] = useState(!work)
   const [animDone, setAnimDone] = useState(false)
-  const completedRef = useRef(false)
   const onCompleteRef = useRef(onComplete)
   onCompleteRef.current = onComplete
 
@@ -76,10 +75,15 @@ export default function ConsoleStatusPlaceholder({
   }, [steps, msPerStep])
 
   useEffect(() => {
-    if (!animDone || !workDone || completedRef.current) return
-    completedRef.current = true
-    const t = setTimeout(() => onCompleteRef.current?.(), 280)
-    return () => clearTimeout(t)
+    if (!animDone || !workDone) return undefined
+    let cancelled = false
+    const t = setTimeout(() => {
+      if (!cancelled) onCompleteRef.current?.()
+    }, 280)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
   }, [animDone, workDone])
 
   const displaySteps = steps.map((s, i) => {

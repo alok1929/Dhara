@@ -19,18 +19,26 @@ export function previewReviewStatus(t, savedIds) {
 // backend/extraction/extractor.py's _build_ddi_id for the same
 // "letter-digits" pattern).
 export function tableCode(table) {
-  const src = table.title || ''
-  const matches = [...src.matchAll(/\b([A-Za-z])-?(\d+(?:\.\d+)?)\b/g)]
-  if (matches.length > 0) {
-    const codes = [...new Set(matches.map((m) => `${m[1].toUpperCase()}${m[2]}`))]
-    return codes.join(', ')
-  }
   const sheet = String(table.sheet || '').trim()
   const genericSheet = !sheet || /^(catalogue|query|table|view|data|base table)$/i.test(sheet)
-  if (!genericSheet) return sheet
-  const title = String(table.title || '').trim()
-  if (title) return title.length > 56 ? `${title.slice(0, 56)}…` : title
-  return table.table_id || table.id || 'Table'
+  const src = table.title || ''
+  const matches = [...src.matchAll(/\b([A-Za-z])-?(\d+(?:\.\d+)?)\b/g)]
+  let label
+  if (matches.length > 0) {
+    const codes = [...new Set(matches.map((m) => `${m[1].toUpperCase()}${m[2]}`))]
+    label = codes.join(', ')
+  } else if (!genericSheet) {
+    label = sheet
+  } else {
+    const title = String(table.title || '').trim()
+    label = title
+      ? (title.length > 56 ? `${title.slice(0, 56)}…` : title)
+      : (table.table_id || table.id || 'Table')
+  }
+  if (!genericSheet && label !== sheet && !String(label).toLowerCase().includes(sheet.toLowerCase())) {
+    return `${sheet} · ${label}`
+  }
+  return label
 }
 
 export function tablePickerLabel(table) {

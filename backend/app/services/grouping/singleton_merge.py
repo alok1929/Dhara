@@ -8,6 +8,7 @@ import re
 from typing import Any, Optional
 
 from app.services.grouping.matching import _base_title, build_group_name
+from app.services.llm.profiles import gemma_2b_json_response_format
 
 from app.services.grouping.embeddings import (
     _suggest_group_name,
@@ -155,13 +156,16 @@ Catalog:
 
     client = llm.openai_sdk()
     model = llm.model if llm.is_on_prem else GROUP_LLM_MODEL
-    resp = client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=6000,
-        temperature=0,
-    )
+    create_kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 6000,
+        "temperature": 0,
+    }
+    response_format = gemma_2b_json_response_format(model)
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
+    resp = client.chat.completions.create(**create_kwargs)
     text = llm.completion_text(resp.choices[0].message).strip()
     try:
         data = llm.loads_json(text, context="singleton_merge") if text else {}

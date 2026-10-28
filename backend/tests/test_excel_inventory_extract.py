@@ -115,6 +115,29 @@ def test_data_points_inventory_keeps_all_rows():
     assert "10" in serials
 
 
+def test_every_sheet_is_extracted():
+    wb = openpyxl.Workbook()
+    first = wb.active
+    first.title = "Births"
+    first.append(["Area", "Count"])
+    first.append(["Urban", 10])
+    first.append(["Rural", 12])
+    second = wb.create_sheet("Deaths")
+    second.append(["Area", "Count"])
+    second.append(["Urban", 3])
+    second.append(["Rural", 4])
+    third = wb.create_sheet("Infant")
+    third.append(["Age", "Count"])
+    third.append(["0-1", 4])
+    third.append(["1-4", 5])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    tables = TableExtractor(skip_llm=True).extract_from_file(buf.getvalue(), "vital.xlsx")
+    assert [t["sheet"] for t in tables] == ["Births", "Deaths", "Infant"]
+    assert all(t["row_count"] >= 1 for t in tables)
+
+
 def test_multiple_tables_one_sheet_extracts_both():
     tables = TableExtractor(skip_llm=True).extract_from_file(
         _multi_table_sheet_bytes(), "04_multiple_tables_one_sheet.xlsx"

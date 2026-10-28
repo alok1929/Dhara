@@ -10,8 +10,9 @@ import ChatConsole from './chat/ChatConsole'
 import Toast from '../ui/Toast'
 
 export default function Console({ hasKey, onGoSettings, onGoDashboard, onGoCatalogue, onUploadAnother }) {
-  const { keySaved } = useApp()
-  const hasLlmKey = hasKey || keySaved
+  const { keySaved, settings } = useApp()
+  const onPremReady = settings.chatSource === 'on_prem' && Boolean(settings.onPremModel)
+  const hasLlmKey = hasKey || keySaved || onPremReady
   const pipeline = useConsolePipeline()
   const { setStep, syncGuidedPreviewStep, step } = pipeline
 

@@ -370,10 +370,10 @@ async def fill_group_metadata(
         skipped, errors = _fill_empty_group_metadata(
             filled, dataset_payloads, kyds_responses, extractor, standard=standard,
         )
-        return filled, skipped, bool(kyds_responses), errors
+        return filled, skipped, errors
 
     try:
-        filled_groups, skipped_no_key, has_kyds, autofill_errors = await asyncio.to_thread(_run)
+        filled_groups, skipped_no_key, autofill_errors = await asyncio.to_thread(_run)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -428,7 +428,7 @@ async def fill_group_metadata(
             for g in filled_groups
         ],
         "llm_autofill_skipped_no_key": skipped_no_key,
-        "kyds_missing": not has_kyds,
+        "kyds_missing": False,
         "autofill_errors": autofill_errors,
         "autofill_failed_count": len(autofill_errors),
         "autofill_filled_count": sum(1 for item in group_metadata if item["filled"]),

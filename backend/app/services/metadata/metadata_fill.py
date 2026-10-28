@@ -269,12 +269,10 @@ def _fill_empty_group_metadata(
     as `{group, error}` so the UI can explain why fields are still empty and
     let the user fill them in manually.
     """
+    # KYDS is optional. Empty groups are filled from the uploaded file's
+    # table facts. A missing Know Your Dataset form must not skip the model.
     if not kyds_responses:
-        # Still report a missing LLM key so the metadata UI can prompt for it
-        # even when KYDS is absent (KYDS-missing is a separate client flag).
-        if getattr(extractor, "skip_llm", False):
-            return True, []
-        return False, []
+        kyds_responses = {}
 
     use_sdg = str(standard or "nmds").lower() == "sdg"
 

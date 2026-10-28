@@ -31,6 +31,7 @@ import {
 } from '../../lib/chatPersist'
 import {
   continuePdfJobFromPreview,
+  datasetNameOf,
   matchResultFromPdfPersistResponse,
 } from '../../lib/chatConsoleHelpers'
 
@@ -67,6 +68,8 @@ export function useConsolePipeline() {
   // restore it after the user has renamed/deleted/hand-built groups, without
   // re-hitting the backend.
   const autoMatchResultRef = useRef(persisted?.autoMatchResult ?? null)
+  /** Chat upload already opened a fresh session; do not drop it when the new match arrives. */
+  const preserveChatSessionRef = useRef(false)
   // True once the user has discarded the automatic grouping in favor of
   // building groups by hand -- lets "+ Add group manually" clear the slate
   // exactly once, then keep appending on every later use instead of wiping
@@ -112,12 +115,18 @@ export function useConsolePipeline() {
   // dropped, blocking the way forward again.
   const [maxStepReached, setMaxStepReached] = useState(persisted?.maxStepReached ?? 0)
   const [chatSessionId, setChatSessionId] = useState(persisted?.chatSessionId ?? null)
-  const [pdfReviewJobId, setPdfReviewJobId] = useState(
-    () => persisted?.pdfReviewJobId ?? loadChatReviewJob() ?? null,
-  )
-  const [pdfReviewFilename, setPdfReviewFilename] = useState(
-    () => persisted?.pdfReviewFilename ?? loadChatReviewFilename() ?? null,
-  )
+  const [pdfReviewJobId, setPdfReviewJobId] = useState(() => {
+    if (persisted && Object.prototype.hasOwnProperty.call(persisted, 'pdfReviewJobId')) {
+      return persisted.pdfReviewJobId || null
+    }
+    return loadChatReviewJob() || null
+  })
+  const [pdfReviewFilename, setPdfReviewFilename] = useState(() => {
+    if (persisted && Object.prototype.hasOwnProperty.call(persisted, 'pdfReviewFilename')) {
+      return persisted.pdfReviewFilename || null
+    }
+    return loadChatReviewFilename() || null
+  })
 
   const setPdfReviewJob = (jobId, filename = null) => {
     setPdfReviewJobId(jobId || null)
@@ -441,21 +450,17 @@ export function useConsolePipeline() {
     setMetadataStarted(false)
     setMaxStepReached(2)
     setUploadChoice((c) => c || 'xlsx')
+    setPdfReviewJob(null, null)
+    if (!preserveChatSessionRef.current) setChatSessionId(null)
+    preserveChatSessionRef.current = false
     setStep(2)
   }
 
-  // Show the Files→Preview status page only AFTER extract/match succeeds,
-  // so the upload fetch is never racing a hidden/remounted BatchUpload.
+  // Open preview as soon as extract/match returns. The old status page
+  // held "Preparing preview" on screen after the data was already ready.
   const handleMatched = (data) => {
-    setStatusPage({
-      ...STATUS_TRANSITIONS.filesToPreview,
-      key: 'filesToPreview',
-      msPerStep: 550,
-      after: () => {
-        setStatusPage(null)
-        finishMatched(data)
-      },
-    })
+    setStatusPage(null)
+    finishMatched(data)
   }
 
   const back = () => {
@@ -517,6 +522,28 @@ export function useConsolePipeline() {
     setPendingDatasetFiles([])
   }
 
+  /** Drop the previous extraction so a new upload is not shown as that preview. */
+  const discardCurrentDataset = () => {
+    setMatchResult(null)
+    autoMatchResultRef.current = null
+    setPdfReviewJob(null, null)
+    setBatchPreviewId(null)
+    setSelectedDataset(null)
+    setSavedIds(new Set())
+    setMetadataStarted(false)
+    setMetadataId(null)
+    setMetadataIds([])
+    setPendingGroups(null)
+    setMetaLabel('')
+    setManualGrouping(false)
+    setEditingGroups(false)
+    setGroupingToast(null)
+    setPreviewReviewFilter('all')
+    setStatusPage(null)
+    setStep(1)
+    setMaxStepReached(1)
+  }
+
   const uploadPdfJob = async (file) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -554,9 +581,12 @@ export function useConsolePipeline() {
   /**
    * @returns {{ kind: 'matched'|'job'|'navigated'|'error', jobId?: string, message?: string }|null}
    */
-  const startDatasetProcessing = async ({ navigate = true } = {}) => {
+  const startDatasetProcessing = async ({ navigate = true, keepChatSession = false } = {}) => {
     const files = pendingDatasetFiles
     if (!files.length) return null
+    preserveChatSessionRef.current = Boolean(keepChatSession)
+    discardCurrentDataset()
+    if (!keepChatSession) setChatSessionId(null)
     setPdfError('')
     setPdfUploading(true)
     try {
@@ -575,12 +605,18 @@ export function useConsolePipeline() {
         jobId = data.job_id || data.batch_id
       }
       setPdfUploading(false)
+      const filename = files.length === 1 ? files[0].name : `${files.length} files`
+      setPdfReviewJob(jobId, filename)
+      setMaxStepReached((m) => Math.max(m, 2))
+      setStep(2)
+      preserveChatSessionRef.current = false
       if (navigate) {
         router.push(`/console/processing/${jobId}`)
         return { kind: 'navigated', jobId }
       }
       return { kind: 'job', jobId }
     } catch (e) {
+      preserveChatSessionRef.current = false
       setPdfError(e.message || 'Upload failed')
       setPdfUploading(false)
       return { kind: 'error', message: e.message }
@@ -599,16 +635,21 @@ export function useConsolePipeline() {
       .concat(matchResult.unmatched_tables.map((u) => u.table))
     : []
   const previewTables = batchAllTables
-  // Dataset (uploaded file) names in upload order, deduped — the chips
-  // shown above the table tab row so a multi-file upload can be narrowed
-  // down to one dataset at a time.
-  const previewDatasets = [...new Set(previewTables.map((t) => t.filename))]
-  // With more than 2 datasets the picker becomes a dropdown, which always
-  // has one dataset selected (no "all" option) — default it to the first
-  // dataset rather than leaving the filter off.
-  const effectiveDataset = selectedDataset || (previewDatasets.length > 2 ? previewDatasets[0] : null)
+  // Every uploaded file, in first-seen order. Preview shows all of them
+  // until the user picks one chip.
+  const previewDatasets = []
+  const seenDatasetNames = new Set()
+  previewTables.forEach((table) => {
+    const name = datasetNameOf(table)
+    if (!name || seenDatasetNames.has(name)) return
+    seenDatasetNames.add(name)
+    previewDatasets.push(name)
+  })
+  const effectiveDataset = selectedDataset && previewDatasets.includes(selectedDataset)
+    ? selectedDataset
+    : null
   const visiblePreviewTables = effectiveDataset
-    ? previewTables.filter((t) => t.filename === effectiveDataset)
+    ? previewTables.filter((t) => datasetNameOf(t) === effectiveDataset)
     : previewTables
   // `_uid` (assigned per-file/per-position by the backend) — not the
   // catalog `id`, which is derived from a table's own content and so can
@@ -622,14 +663,18 @@ export function useConsolePipeline() {
     // Keep the dataset filter in sync so a table jumped to from elsewhere
     // (e.g. ReconcileIds' "next flagged table") stays visible in the tab row.
     const t = previewTables.find((pt) => pt._uid === uid)
-    if (t && effectiveDataset && t.filename !== effectiveDataset) setSelectedDataset(t.filename)
+    const tableDataset = datasetNameOf(t)
+    if (t && effectiveDataset && tableDataset !== effectiveDataset) setSelectedDataset(tableDataset)
   }
   const selectPreviewDataset = (name) => {
-    setSelectedDataset(name)
+    const nextName = name && previewDatasets.includes(name) ? name : null
+    setSelectedDataset(nextName)
     // Jump the active table tab to one within the newly chosen dataset so
     // the preview below always matches what the tab row shows.
-    const firstInDataset = previewTables.find((t) => t.filename === name)
-    if (firstInDataset && previewSelected?.filename !== name) setBatchPreviewId(firstInDataset._uid)
+    const pool = nextName
+      ? previewTables.filter((t) => datasetNameOf(t) === nextName)
+      : previewTables
+    if (pool[0]) setBatchPreviewId(pool[0]._uid)
   }
   const markTableSaved = (uid, correction) => {
     setSavedIds((prev) => (prev.has(uid) ? prev : new Set(prev).add(uid)))
@@ -721,6 +766,7 @@ export function useConsolePipeline() {
     removeStep1MetadataFile,
     requestContinueToMetadata,
     resetUploadChoice,
+    discardCurrentDataset,
     savedIds,
     selectPreviewDataset,
     selectPreviewTable,

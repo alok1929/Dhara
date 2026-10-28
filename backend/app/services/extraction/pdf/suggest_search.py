@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List
 
 from app.services.extraction.pdf.llm_json import loads_llm_json
+from app.services.llm.profiles import fit_gemma_2b_completion, gemma_2b_json_response_format
 from app.services.llm_prompts import TABLE_AI_SEARCH_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -85,14 +86,18 @@ def suggest_tables_from_prompt(
         prompt=text,
         catalog_json=json.dumps(catalog, ensure_ascii=False),
     )
+    user_prompt, max_tokens = fit_gemma_2b_completion(llm.model, user_prompt, 8000)
     client = llm.openai_sdk()
-    resp = client.chat.completions.create(
-        model=llm.model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=8000,
-        temperature=0,
-    )
+    create_kwargs = {
+        "model": llm.model,
+        "messages": [{"role": "user", "content": user_prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+    }
+    response_format = gemma_2b_json_response_format(llm.model)
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
+    resp = client.chat.completions.create(**create_kwargs)
     raw = llm.completion_text(resp.choices[0].message).strip()
     try:
         data = llm.loads_json(raw, context="suggest_search")

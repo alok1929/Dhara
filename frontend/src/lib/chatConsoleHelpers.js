@@ -3,6 +3,23 @@ import { withLlmKeyHeaders } from './llmKey'
 import { pdfGroupingToMatchResult, previewReviewStatus } from './postPreview'
 export { excludeTablesFromMatchResult } from './chatTableExclusions'
 
+/** Uploaded workbook / PDF name stored on an extracted table. */
+export function datasetNameOf(table) {
+  return table?.filename || table?.source_file || table?.source_filename || null
+}
+
+export function datasetNamesFromTables(tables) {
+  const names = []
+  const seen = new Set()
+  ;(tables || []).forEach((table) => {
+    const name = datasetNameOf(table)
+    if (!name || seen.has(name)) return
+    seen.add(name)
+    names.push(name)
+  })
+  return names
+}
+
 export function previewStageSummary(tables, savedIds) {
   const list = tables || []
   const needsFix = list.filter((t) => previewReviewStatus(t, savedIds) === 'fix').length

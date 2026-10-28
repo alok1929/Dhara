@@ -7,7 +7,9 @@ import { withinStageBack } from './ConsoleStages'
 import ClassifyBreadcrumb from './classify/ClassifyBreadcrumb'
 import ConsoleViewHeader from './ConsoleViewHeader'
 import { isChatModeAllowedForStep } from '../../lib/chatStages'
+import { buildStageCommandLines } from '../../lib/chatCommands'
 import PdfReview from '../pdf/PdfReview'
+import StageCommandBar from './StageCommandBar'
 
 export default function ConsoleGuidedView({
   uiMode,
@@ -38,6 +40,9 @@ export default function ConsoleGuidedView({
     pdfReviewFilename,
     setPdfReviewJob,
     continueFromPdfPreview,
+    previewTables,
+    matchResult,
+    pendingDatasetFiles,
   } = pipeline
 
   const stageBack = withinStageBack(step)
@@ -68,6 +73,19 @@ export default function ConsoleGuidedView({
           return s <= maxStepReached
         }}
       />
+
+      {!statusPage && (
+        <StageCommandBar
+          step={step}
+          hasLlmKey={hasLlmKey}
+          lines={buildStageCommandLines(step, {
+            tables: previewTables,
+            matchResult,
+            classificationComplete,
+            fileCount: pendingDatasetFiles?.length || 0,
+          })}
+        />
+      )}
 
       <div key={step === 5 || step === 6 ? 'classify-harmonise' : step} className="dhara-page-enter flex min-w-0 flex-1 flex-col gap-[18px]">
         {!statusPage && !showPdfPreview && (

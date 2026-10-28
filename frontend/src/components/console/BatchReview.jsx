@@ -95,8 +95,9 @@ export default function BatchReview({
   onMatchResultChange,
   onGoSettings,
 }) {
-  const { keySaved } = useApp()
-  const hasLlmKey = keySaved
+  const { keySaved, settings } = useApp()
+  const onPremReady = settings.chatSource === 'on_prem' && Boolean(settings.onPremModel)
+  const hasLlmKey = keySaved || onPremReady
   const conceptConfig = useMemo(() => getConceptStandardConfig(getMetadataStandard()), [])
   const sheetColumns = useMemo(() => {
     const base = conceptConfig.sheetColumns || METADATA_COLUMNS
@@ -260,6 +261,7 @@ export default function BatchReview({
     // when kick advances (KYDS save / Retry button).
     const alreadyAttempted = Boolean(matchResult?.autofill_attempted)
       && !matchResult?.llm_autofill_skipped_no_key
+      && !matchResult?.kyds_missing
     if (alreadyAttempted && autofillKick === lastAutofillKickRef.current) {
       autofillAttemptTokenRef.current = token
       return

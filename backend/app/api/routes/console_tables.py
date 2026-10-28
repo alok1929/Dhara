@@ -35,6 +35,45 @@ def _table_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     return entry
 
 
+@router.post("/api/console/stage-command")
+async def console_stage_command(
+    request: Request,
+    user_email: str = Depends(require_user_email),
+    db: Session = Depends(get_db),
+):
+    """Answer one fixed stage command. The command text is never trimmed."""
+    from app.services.llm.chat_commands import match_stage_command, run_stage_command
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    command = str(body.get("command") or body.get("prompt") or "").strip()
+    if match_stage_command(command) is None:
+        raise HTTPException(400, "Unknown command")
+
+    api_key, _provider = resolve_llm_credentials(request, user_email, db=db)
+    if not chat_ready_for_user(db, user_email, api_key, _provider):
+        raise HTTPException(
+            400,
+            "Configure LLM in Settings (cloud API key or on-prem model) before using chat",
+        )
+    routing = llm_routing_for_user(db, user_email)
+    raw_lines = body.get("lines")
+    lines = [str(line) for line in raw_lines if str(line).strip()] if isinstance(raw_lines, list) else []
+
+    try:
+        with llm_routing_scope(routing):
+            return run_stage_command(command=command, lines=lines, api_key=api_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, f"Could not run chat: {e}") from e
+
+
 @router.post("/api/console/tables/ai-search")
 async def console_ai_search_tables(
     request: Request,

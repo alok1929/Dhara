@@ -1,21 +1,23 @@
-# Dhara on-prem chat: one FastAPI gateway, one vLLM OpenAI server.
+# Dhara on-prem chat: one FastAPI gateway, one or more OpenAI-compatible servers.
 #
 # The llm folder is a Dockerfile, not an application. GPU checkpoints use
-# vllm/vllm-openai and profile llm. gemma-2-2b-it uses vllm/vllm-openai-cpu
-# and profile llm-cpu. Enable only one of those profiles. They share the
+# vllm/vllm-openai and profile llm. Profile llm-cpu starts two CPU servers
+# side by side: gemma-2-2b-it (vllm/vllm-openai-cpu, container dhara-model-llm)
+# and bitnet-b1.58-2b (bitnet.cpp, container dhara-model-bitnet). Enable only
+# one of those profiles. The GPU service and the Gemma service share the
 # container name dhara-model-llm.
 #
-# Switching checkpoints is LLM_MODEL=<folder> plus a rebuild.
-# Dhara sets DHARA_LLM_BASE_URL=http://model-gateway:8100 and
-# DHARA_LLM_MODEL to the same catalogue id (SERVED_NAME).
+# Settings picks which catalogue id the API sends. The gateway forwards that
+# id. LLM_MODEL is the primary server. LLM_EXTRA_UPSTREAMS is every other
+# server that should stay loaded.
 #
 #   cd deploy/model-server
 #   cp .env.example .env
 #   # GPU:
 #   docker compose -f compose.llm-only.yml --profile llm up -d --build
-#   # CPU. The inline LLM_MODEL keeps the gateway id equal to SERVED_NAME
-#   # even when .env still points at a GPU checkpoint. Do not also enable
-#   # profile llm (COMPOSE_PROFILES=llm); both profiles share one container name.
+#   # CPU. Gemma stays LLM_MODEL. BitNet starts beside it. Do not also enable
+#   # profile llm (COMPOSE_PROFILES=llm); the GPU service and Gemma share one
+#   # container name.
 #   LLM_MODEL=gemma-2-2b-it docker compose -f compose.llm-only.yml --profile llm-cpu up -d --build
 
 name: dhara-model-server
@@ -45,7 +47,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
-      LLM_EXTRA_UPSTREAMS: ${LLM_EXTRA_UPSTREAMS:-}
+      LLM_EXTRA_UPSTREAMS: ${LLM_EXTRA_UPSTREAMS:-bitnet-b1.58-2b=http://bitnet:8003,phi-2=http://phi-2:8003,phi-3-mini-4k-instruct=http://phi-3-mini:8003,phi-4-mini-instruct=http://phi-4-mini:8003,gemma-3-4b=http://gemma-3-4b:8003}
     volumes:
       - ./models.yaml:/app/app/models.yaml:ro
     networks:
@@ -79,7 +81,7 @@ services:
       GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
       MAX_MODEL_LEN: ${VLLM_MAX_MODEL_LEN:-32768}
       MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS:-8}
-      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-${HF_TOKEN:-}}
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
     volumes:
       - hf_cache:/root/.cache/huggingface
     healthcheck:
@@ -117,7 +119,7 @@ services:
       MAX_NUM_SEQS: ${VLLM_CPU_MAX_NUM_SEQS:-2}
       VLLM_CPU_KVCACHE_SPACE: ${VLLM_CPU_KVCACHE_SPACE:-4}
       VLLM_CPU_OMP_THREADS_BIND: ${VLLM_CPU_OMP_THREADS_BIND:-auto}
-      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-${HF_TOKEN:-}}
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
     volumes:
       - hf_cache:/root/.cache/huggingface
     healthcheck:
@@ -134,6 +136,187 @@ services:
       model_net:
         aliases:
           - llm
+
+  # Second CPU server. Gemma stays in dhara-model-llm. Settings sends this
+  # catalogue id; the gateway forwards it to the alias below.
+  bitnet:
+    profiles: ["llm-cpu"]
+    build:
+      context: ./llm/bitnet-b1.58-2b
+    image: dhara/model-llm:bitnet-b1.58-2b
+    container_name: dhara-model-bitnet
+    restart: unless-stopped
+    environment:
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      MAX_MODEL_LEN: "4096"
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks:
+      model_net:
+        aliases:
+          - bitnet
+
+  # Phi-2 2.7B. Same CPU profile, its own container. Settings sends id phi-2.
+  phi-2:
+    profiles: ["llm-cpu"]
+    build:
+      context: ./llm/phi-2
+    image: dhara/model-llm:phi-2
+    container_name: dhara-model-phi-2
+    restart: unless-stopped
+    shm_size: "4gb"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_NICE
+    environment:
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "2"
+      VLLM_CPU_KVCACHE_SPACE: "2"
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks:
+      model_net:
+        aliases:
+          - phi-2
+
+  # Phi-3 Mini 3.8B. Under 5B, same CPU profile, its own container.
+  phi-3-mini:
+    profiles: ["llm-cpu"]
+    build:
+      context: ./llm/phi-3-mini-4k-instruct
+    image: dhara/model-llm:phi-3-mini-4k-instruct
+    container_name: dhara-model-phi-3-mini
+    restart: unless-stopped
+    shm_size: "4gb"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_NICE
+    environment:
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "2"
+      VLLM_CPU_KVCACHE_SPACE: "4"
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks:
+      model_net:
+        aliases:
+          - phi-3-mini
+
+  # Phi-4 Mini is 3.8B. CPU build uses Dockerfile.cpu. The GPU Dockerfile stays.
+  phi-4-mini:
+    profiles: ["llm-cpu"]
+    build:
+      context: ./llm/phi-4-mini-instruct
+      dockerfile: Dockerfile.cpu
+    image: dhara/model-llm:phi-4-mini-instruct-cpu
+    container_name: dhara-model-phi-4-mini
+    restart: unless-stopped
+    shm_size: "4gb"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_NICE
+    environment:
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      MAX_MODEL_LEN: "8192"
+      MAX_NUM_SEQS: "2"
+      VLLM_CPU_KVCACHE_SPACE: "6"
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks:
+      model_net:
+        aliases:
+          - phi-4-mini
+
+  # Gemma 3 4B is under 5B. CPU build uses Dockerfile.cpu. The GPU Dockerfile stays.
+  gemma-3-4b:
+    profiles: ["llm-cpu"]
+    build:
+      context: ./llm/gemma-3-4b
+      dockerfile: Dockerfile.cpu
+    image: dhara/model-llm:gemma-3-4b-cpu
+    container_name: dhara-model-gemma-3-4b
+    restart: unless-stopped
+    shm_size: "4gb"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_NICE
+    environment:
+      PORT: "8003"
+      HEALTHCHECK_PORT: "8003"
+      MAX_MODEL_LEN: "8192"
+      MAX_NUM_SEQS: "2"
+      VLLM_CPU_KVCACHE_SPACE: "6"
+      HUGGING_FACE_HUB_TOKEN: ${LLM_HF_TOKEN:-$HF_TOKEN}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "PY=$$(command -v python3 || command -v python); exec $$PY -c \"import os,sys,urllib.request; p=os.environ.get('HEALTHCHECK_PORT','8003'); sys.exit(0 if urllib.request.urlopen('http://localhost:'+p+'/health',timeout=5).status==200 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    networks:
+      model_net:
+        aliases:
+          - gemma-3-4b
 
 volumes:
   hf_cache:

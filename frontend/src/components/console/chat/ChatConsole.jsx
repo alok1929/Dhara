@@ -36,10 +36,13 @@ import {
 } from '../../../lib/consoleChatSession'
 import { saveConsoleUiMode, UI_MODES } from '../../../lib/consoleUiMode'
 import { isChatModeAllowedForStep, stepForChatPillId } from '../../../lib/chatStages'
+import { buildStageCommandLines, composerCommandsForStep, isSaveAndProceedPhrase, isStageCommand } from '../../../lib/chatCommands'
+import { postStageCommand } from '../../../lib/stageCommandClient'
 import { requestAppSidebarCollapse } from '../../../lib/appSidebar'
 import {
   catalogFromBatchTables,
   catalogFromPdfResultTables,
+  datasetNamesFromTables,
   excludeTablesFromMatchResult,
   fetchPdfJobResultTables,
   groupingStageSummary,
@@ -155,13 +158,26 @@ export default function ChatConsole({
     removePendingDatasetFile,
     removeStep1MetadataFile,
     chatSessionId,
+    setChatSessionId,
     beginNewConsoleChatSession,
+    discardCurrentDataset,
     linkConsoleChatSessionId,
     pdfReviewJobId,
     pdfReviewFilename,
     setPdfReviewJob,
     continueFromPdfPreview,
   } = pipeline
+
+  /** User opened Files, or Guided view already has new files waiting. Do not snap back to the old preview. */
+  const [choosingNewUpload, setChoosingNewUpload] = useState(
+    () => step === 1 && pendingDatasetFiles.length > 0,
+  )
+  const creatingChatSessionRef = useRef(false)
+  const datasetIdentityRef = useRef({ batchId: null, pdfJobId: null })
+  datasetIdentityRef.current = {
+    batchId: matchResult?.batch_id || null,
+    pdfJobId: pdfReviewJobId || matchResult?.pdf_job_id || null,
+  }
 
   const chatHydratedRef = useRef(false)
   const skipChatLoadRef = useRef(null)
@@ -189,6 +205,23 @@ export default function ChatConsole({
     fetchConsoleChatSession(chatSessionId)
       .then((data) => {
         if (cancelled) return
+        const currentBatch = datasetIdentityRef.current.batchId
+        const currentPdf = datasetIdentityRef.current.pdfJobId
+        const sessionBatch = data.batch_id || null
+        const sessionPdf = data.pdf_job_id || null
+        const staleSession = Boolean(
+          (sessionBatch && currentBatch && sessionBatch !== currentBatch)
+          || (sessionPdf && currentPdf && sessionPdf !== currentPdf)
+          || (sessionPdf && currentBatch && !currentPdf)
+          || (sessionBatch && currentPdf && !currentBatch)
+        )
+        if (staleSession) {
+          setMessages([])
+          setMessagesReady(true)
+          chatHydratedRef.current = true
+          setChatSessionId(null)
+          return
+        }
         setMessages(Array.isArray(data.messages) ? data.messages : [])
         setMessagesReady(true)
         chatHydratedRef.current = true
@@ -200,7 +233,7 @@ export default function ChatConsole({
         chatHydratedRef.current = true
       })
     return () => { cancelled = true }
-  }, [chatSessionId])
+  }, [chatSessionId, setChatSessionId])
 
   useEffect(() => {
     if (!chatSessionId || !messagesReady || !chatHydratedRef.current) return undefined
@@ -211,18 +244,44 @@ export default function ChatConsole({
   }, [messages, chatSessionId, messagesReady])
 
   useEffect(() => {
-    const batchId = matchResult?.batch_id
-    if (!chatSessionId || !batchId) return
-    linkConsoleChatSessionId({ batchId }).catch(() => {})
-  }, [chatSessionId, matchResult?.batch_id, linkConsoleChatSessionId])
+    if (step >= 2 && (previewTables.length > 0 || pdfReviewJobId)) {
+      setChoosingNewUpload(false)
+    }
+  }, [step, previewTables.length, pdfReviewJobId])
+
+  useEffect(() => {
+    if (chatSessionId || creatingChatSessionRef.current) return undefined
+    if (choosingNewUpload || step < 2) return undefined
+    if (!pdfReviewJobId && previewTables.length === 0) return undefined
+    creatingChatSessionRef.current = true
+    beginNewConsoleChatSession({
+      batchId: matchResult?.batch_id || null,
+      pdfJobId: pdfReviewJobId || matchResult?.pdf_job_id || null,
+    }).then((id) => {
+      skipChatLoadRef.current = id
+    }).catch(() => {}).finally(() => {
+      creatingChatSessionRef.current = false
+    })
+    return undefined
+  }, [
+    chatSessionId,
+    choosingNewUpload,
+    matchResult?.batch_id,
+    matchResult?.pdf_job_id,
+    pdfReviewJobId,
+    previewTables.length,
+    step,
+  ])
 
   // Restore step to preview when a PDF/batch result exists — do not auto-open workspace.
+  // Skip this while the user is on Files choosing a new upload.
   useEffect(() => {
+    if (choosingNewUpload) return
     if (!pdfReviewJobId && previewTables.length === 0) return
     if (step >= 3) return
     setMaxStepReached((m) => Math.max(m, 2))
     setStep((s) => (s < 2 ? 2 : s))
-  }, [pdfReviewJobId, previewTables.length, setMaxStepReached, setStep, step])
+  }, [choosingNewUpload, pdfReviewJobId, previewTables.length, setMaxStepReached, setStep, step])
 
   // Close inspect split when leaving preview step (e.g. after trust-path verify).
   useEffect(() => {
@@ -285,29 +344,49 @@ export default function ChatConsole({
   }, [])
 
   useEffect(() => {
-    if (step !== 2) return
-    if (pdfReviewJobId) {
-      ensureStageAnchor('preview', () => ({
+    if (step !== 2 || !messagesReady) return
+    const names = datasetNamesFromTables(previewTables)
+    if (!names.length && pdfReviewFilename) names.push(pdfReviewFilename)
+    const fileKey = `${pdfReviewJobId || ''}|${names.join('\n')}`
+    if (!pdfReviewJobId && names.length === 0) return
+    const fileCountLabel = names.length === 1 ? names[0] : `${names.length} files`
+    const s = previewStageSummary(previewTables, savedIds)
+    const card = pdfReviewJobId && previewTables.length === 0
+      ? {
         title: 'Preview',
-        subtitle: pdfReviewFilename || undefined,
-        summary: 'Your PDF has been uploaded and is in Preview.',
-        bullets: [],
-      }))
-      return
-    }
-    if (previewTables.length) {
-      const s = previewStageSummary(previewTables, savedIds)
-      ensureStageAnchor('preview', () => ({
+        subtitle: fileCountLabel,
+        summary: names.length > 1
+          ? `All ${names.length} uploaded files are in Preview.`
+          : `${fileCountLabel} is in Preview.`,
+        bullets: names.length > 1 ? names : [],
+        fileKey,
+      }
+      : {
         title: 'Preview',
-        summary: `Your files have been uploaded and are in Preview. I found ${s.total} table${s.total === 1 ? '' : 's'} across your documents.`,
+        subtitle: fileCountLabel,
+        summary: `Preview includes ${fileCountLabel}. I found ${s.total} table${s.total === 1 ? '' : 's'}.`,
         bullets: [
+          ...(names.length > 1 ? names : []),
           `${s.ok} look good.`,
           s.needsFix ? `${s.needsFix} need review.` : null,
           s.aiReview ? `${s.aiReview} filled by AI and need a quick check.` : null,
         ].filter(Boolean),
-      }))
-    }
-  }, [step, previewTables, savedIds, ensureStageAnchor, pdfReviewJobId, pdfReviewFilename])
+        fileKey,
+      }
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.kind === 'stage' && m.stageId === 'preview')
+      if (idx < 0) {
+        return [...prev, { id: newId(), kind: 'stage', stageId: 'preview', ...card }]
+      }
+      if (prev[idx].fileKey === fileKey && prev[idx].summary === card.summary) return prev
+      if (prev[idx].fileKey === fileKey) {
+        const next = [...prev]
+        next[idx] = { ...prev[idx], ...card }
+        return next
+      }
+      return [{ id: prev[idx].id, kind: 'stage', stageId: 'preview', ...card }]
+    })
+  }, [step, previewTables, savedIds, messagesReady, pdfReviewJobId, pdfReviewFilename])
 
   useEffect(() => {
     if (step === 3 && matchResult) {
@@ -337,6 +416,14 @@ export default function ChatConsole({
     if (targetStep === 6) {
       requestHarmonisation()
       return
+    }
+    if (targetStep === 1) {
+      setChoosingNewUpload(true)
+      setWorkspace(null)
+      setActiveJobId(null)
+      saveChatActiveJob(null)
+    } else {
+      setChoosingNewUpload(false)
     }
     goToStep(targetStep)
   }
@@ -517,7 +604,9 @@ export default function ChatConsole({
     saveChatActiveJob(null)
     saveChatReviewJob(null)
     setActiveJobId(null)
-    setPdfReviewJob(null, null)
+    discardCurrentDataset()
+    setChoosingNewUpload(false)
+    setClassificationComplete(false)
     setPreviewAiFilter(null)
     setWorkspace(null)
     const taskKey = `extract-${Date.now()}`
@@ -528,7 +617,7 @@ export default function ChatConsole({
       lines: ['Uploading files and starting extraction…'],
       jobId: null,
     })
-    const result = await startDatasetProcessing({ navigate: false })
+    const result = await startDatasetProcessing({ navigate: false, keepChatSession: true })
     if (result?.kind === 'matched') {
       upsertTask(taskKey, {
         status: 'done',
@@ -785,6 +874,32 @@ export default function ChatConsole({
   const handleUserMessage = async (text) => {
     const conversation = buildPreviewChatConversation(messages)
     appendMessage({ kind: 'user', text })
+    if (isSaveAndProceedPhrase(text)) {
+      if (proceeding || activeJobId) {
+        appendMessage({ kind: 'assistant', text: 'Saving is already in progress.' })
+        return
+      }
+      if (step === 2) {
+        appendMessage({ kind: 'assistant', text: 'Saving and continuing to grouping.' })
+        handleVerifyForStage('preview')
+        return
+      }
+      if (step === 3) {
+        appendMessage({ kind: 'assistant', text: 'Continuing to metadata.' })
+        handleVerifyForStage('grouping')
+        return
+      }
+      if (step === 4) {
+        appendMessage({ kind: 'assistant', text: 'Continuing to classification.' })
+        handleVerifyForStage('grouping-metadata')
+        return
+      }
+      appendMessage({
+        kind: 'assistant',
+        text: 'Save and proceed is available on Preview, Grouping, and Metadata.',
+      })
+      return
+    }
     if (!hasLlmKey) {
       appendMessage({ kind: 'assistant', text: 'Save an LLM API key in Settings to chat about your tables.' })
       return
@@ -792,6 +907,36 @@ export default function ChatConsole({
 
     setComposerLoading(true)
     try {
+      if (isStageCommand(text)) {
+        let tables = previewTables
+        if (!tables.length && (pdfReviewJobId || resolveChatJobId())) {
+          tables = await fetchPdfJobResultTables(pdfReviewJobId || resolveChatJobId()).catch(() => [])
+        }
+        const lines = buildStageCommandLines(step, {
+          tables,
+          matchResult,
+          classificationComplete,
+          fileCount: pendingDatasetFiles?.length || 0,
+        })
+        const data = await postStageCommand(text, lines)
+        appendMessage({ kind: 'assistant', text: data.reply || 'Done.' })
+        const findIds = (data.table_ids || []).map(String).filter(Boolean)
+        if (data.action === 'find' && findIds.length) {
+          const pdfJob = Boolean(pdfReviewJobId || resolveChatJobId())
+          const rows = rowsFromMatchedTables(tables, findIds, { pdfJob })
+          if (rows.length) {
+            appendMessage({
+              kind: 'tableResults',
+              variant: 'find',
+              rationale: 'Open a row to inspect it in Preview.',
+              tableIds: rows.map((row) => row.id),
+              rows,
+            })
+          }
+        }
+        return
+      }
+
       const jobId = resolveChatJobId()
       // PDF jobs: notebook-style backend llm_input (Preview + Grouping).
       if (jobId && (step === 2 || step === 3 || step === 4)) {
@@ -987,7 +1132,9 @@ export default function ChatConsole({
     }
   }
 
-  const showUpload = step === 1 && !previewTables.length && !statusPage && !activeJobId && !pdfReviewJobId
+  const showUpload = step === 1 && !statusPage && !activeJobId && (
+    choosingNewUpload || (!previewTables.length && !pdfReviewJobId)
+  )
   const showChat = !showUpload
 
   const isPdfRelease = Boolean(pdfReviewJobId || matchResult?.pdf_job_id)
@@ -1136,7 +1283,10 @@ export default function ChatConsole({
                         </Button>
                       </div>
                     ) : null
-                    const expandStageId = sid.replace('-metadata', '')
+                    const expandStageId = sid === 'grouping-metadata' ? 'grouping-metadata' : sid
+                    const workspaceOpen = sid === 'grouping-metadata'
+                      ? workspace?.stageId === 'grouping' && step === 4
+                      : workspace?.stageId === sid
                     return (
                       <div
                         key={m.id}
@@ -1151,7 +1301,7 @@ export default function ChatConsole({
                           extra={downloadExtra}
                           expandLabel={isPreviewStage ? 'Expand and preview' : 'Expand'}
                           onExpand={
-                            sid !== 'publish' && workspace?.stageId !== expandStageId
+                            sid !== 'publish' && !workspaceOpen
                               ? () => openWorkspace(expandStageId)
                               : undefined
                           }
@@ -1238,6 +1388,7 @@ export default function ChatConsole({
                 onSend={handleUserMessage}
                 disabled={!hasLlmKey}
                 loading={composerLoading}
+                commands={composerCommandsForStep(step)}
               />
             </div>
           )}

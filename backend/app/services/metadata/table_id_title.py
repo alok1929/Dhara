@@ -84,7 +84,19 @@ def _apply_llm_id_title_repair(table: dict, table_id: str, title: str, api_key: 
     return table_id, title, validate_table_fields_code(table_id, title)
 
 
-def _validate_table_id_title(table: dict, api_key: Optional[str] = None) -> None:
+def _cloud_llm_validation_enabled(api_key: Optional[str] = None) -> bool:
+    """Per-table LLM checks are too slow on the small on-prem model.
+
+    Preview should open from the deterministic ID/title checks. Cloud models
+    can still validate and repair.
+    """
+    from app.services.llm.factory import live_openai_chat
+
+    llm = live_openai_chat(api_key)
+    return bool(llm is not None and not llm.is_on_prem)
+
+
+def _validate_table_id_title(table: dict, api_key: Optional[str] = None, *, allow_llm: bool = True) -> None:
     """Runs the code-based and prompt-based Source Table ID / Table Title validators
     on one extracted table (mirrors the notebook's Stage 2.5) and annotates
     the table in place with the results plus a `id_title_mismatch` flag the
@@ -115,10 +127,12 @@ def _validate_table_id_title(table: dict, api_key: Optional[str] = None) -> None
         or any("table id" in str(i).lower() and "missing" in str(i).lower() for i in (code_result.get("issues") or []))
     )
 
-    if needs_repair:
+    if allow_llm and needs_repair:
         table_id, title, code_result = _apply_llm_id_title_repair(table, table_id, title, api_key=api_key)
 
-    if not str(table_id or "").strip() and not str(title or "").strip():
+    if not allow_llm:
+        llm_result = {"valid": None, "issues": ["LLM validation skipped (on-prem model)"]}
+    elif not str(table_id or "").strip() and not str(title or "").strip():
         # Nothing to send the model -- both fields are already conclusively
         # invalid, so skip the LLM call rather than prompting it with two
         # empty strings.
@@ -136,7 +150,8 @@ def _validate_table_id_title(table: dict, api_key: Optional[str] = None) -> None
     )
     already_repaired = table.get("title_repaired_by_llm") or table.get("table_id_repaired_by_llm")
     if (
-        not already_repaired
+        allow_llm
+        and not already_repaired
         and llm_result.get("valid") is False
         and llm_field_issue
     ):
@@ -167,5 +182,10 @@ def _validate_tables(tables: list, api_key: Optional[str] = None) -> None:
     if not tables:
         return
     key = (api_key or "").strip() or None
+    allow_llm = _cloud_llm_validation_enabled(key)
+    if not allow_llm:
+        for table in tables:
+            _validate_table_id_title(table, api_key=key, allow_llm=False)
+        return
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        list(pool.map(lambda t: _validate_table_id_title(t, api_key=key), tables))
+        list(pool.map(lambda t: _validate_table_id_title(t, api_key=key, allow_llm=True), tables))

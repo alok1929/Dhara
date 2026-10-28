@@ -1,0 +1,24 @@
+# Gemma 3 4B Instruct on the vLLM CPU image.
+#
+# The GPU recipe stays in Dockerfile. This file is what profile llm-cpu runs.
+# CPU context is 8192 so the KV cache fits beside the other small models.
+# SERVED_NAME matches the catalogue id. Accept the Gemma license first.
+FROM vllm/vllm-openai-cpu:v0.27.1
+
+ENV MODEL_ID=google/gemma-3-4b-it \
+    SERVED_NAME=gemma-3-4b \
+    PORT=8003 \
+    MAX_MODEL_LEN=8192 \
+    MAX_NUM_SEQS=2 \
+    VLLM_CPU_KVCACHE_SPACE=6 \
+    VLLM_CPU_OMP_THREADS_BIND=auto
+
+ENV EXTRA_ARGS="--dtype bfloat16"
+
+EXPOSE 8003
+ENTRYPOINT ["sh", "-c", "exec vllm serve $MODEL_ID \
+  --served-model-name $SERVED_NAME \
+  --host 0.0.0.0 --port $PORT \
+  --max-model-len $MAX_MODEL_LEN \
+  --max-num-seqs $MAX_NUM_SEQS \
+  $EXTRA_ARGS"]

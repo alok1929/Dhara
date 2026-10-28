@@ -68,7 +68,9 @@ Use double quotes for all keys and string values. Use null (not None) for unknow
 Escape any double quotes that appear inside string values.
 """
     kyds_llm = prepare_kyds_for_llm(kyds)
-    user_content = {"excel_facts": excel_facts, "dataset_context": kyds_llm}
+    user_content = {"excel_facts": excel_facts}
+    if any(kyds_llm.values()):
+        user_content["dataset_context"] = kyds_llm
     prompt = f"{system_prompt}\n\n{json.dumps(user_content, default=str)}"
     return complete_fn(prompt, 3000)
 

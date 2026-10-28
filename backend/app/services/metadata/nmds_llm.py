@@ -61,7 +61,10 @@ Escape any double quotes that appear inside string values.
 """  # TODO: prompt to be added
 
     kyds_llm = prepare_kyds_for_llm(kyds)
-    user_content = {"excel_facts": excel_facts, "dataset_context": kyds_llm}
+    # Catalogue values come from the uploaded file. KYDS is not required.
+    user_content = {"excel_facts": excel_facts}
+    if any(kyds_llm.values()):
+        user_content["dataset_context"] = kyds_llm
 
     prompt = f"{system_prompt}\n\n{json.dumps(user_content, default=str)}"
     # Catalogue metadata can be verbose; under-tokenizing truncates JSON mid-string.

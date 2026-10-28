@@ -42,11 +42,17 @@ services:
       - 8.8.8.8
       - 1.1.1.1
     ports:
-      - "8000:8000"
+      # Host 8000 is already taken on this machine. API is published on 8002.
+      - "8002:8000"
     environment:
       # Must win over backend/.env (which uses localhost for host-run backends).
       DATABASE_URL: postgresql://dhara:dhara_local_password@postgres:5432/dhara
       ENABLE_GCS: "false"
+      # Gateway from deploy/model-server (Gemma CPU). Host port is 8101.
+      DHARA_LLM_BASE_URL: http://host.docker.internal:8101
+      DHARA_LLM_MODEL: gemma-2-2b-it
+      DHARA_LLM_API_KEY: local
+      DHARA_MODEL_CATALOG_PATH: /deploy/model-server/models.yaml
     env_file:
       - path: backend/.env
         required: false
@@ -66,6 +72,7 @@ services:
       start_period: 20s
     volumes:
       - ./backend:/backend
+      - ./deploy/model-server/models.yaml:/deploy/model-server/models.yaml:ro
     command:
       [
         "uvicorn",
@@ -84,8 +91,8 @@ services:
     container_name: dhara-frontend
     restart: unless-stopped
     ports:
-      # Host :80 for Cloudflare Tunnel / reverse proxy; Next still listens on 3000 inside.
-      - "80:3000"
+      # Rootless Podman cannot bind host port 80. Next still listens on 3000 inside.
+      - "3001:3000"
     environment:
       BACKEND_ORIGIN: http://backend:8000
     depends_on:

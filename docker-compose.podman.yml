@@ -39,8 +39,8 @@ services:
     environment:
       DATABASE_URL: postgresql://dhara:dhara_local_password@postgres:5432/dhara
       ENABLE_GCS: "false"
-      DHARA_LLM_BASE_URL: http://host.containers.internal:8100
-      DHARA_LLM_MODEL: phi-4-mini-instruct
+      DHARA_LLM_BASE_URL: http://host.containers.internal:8101
+      DHARA_LLM_MODEL: gemma-2-2b-it
       DHARA_LLM_API_KEY: local
       DHARA_MODEL_CATALOG_PATH: /deploy/model-server/models.yaml
     env_file:

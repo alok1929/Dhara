@@ -41,6 +41,12 @@ with the gateway id pinned to the CPU checkpoint:
 LLM_MODEL=gemma-2-2b-it docker compose -f compose.llm-only.yml --profile llm-cpu up -d --build
 ```
 
+The same CPU command also starts BitNet b1.58 2B in `dhara-model-bitnet`.
+Gemma stays in `dhara-model-llm`. The gateway routes `bitnet-b1.58-2b` to
+`http://bitnet:8003` and `gemma-2-2b-it` to `http://llm:8003`. Settings
+chooses which id the API sends. The first BitNet build compiles bitnet.cpp.
+The first start downloads `ggml-model-i2_s.gguf` into `hf_cache`.
+
 The gateway still starts without a model profile and answers 503 for chat.
 
 Check the catalogue id:
@@ -106,11 +112,16 @@ an ops env change, not a Settings provider.
 The default folder is `llm/phi-4-mini-instruct` (`microsoft/Phi-4-mini-instruct`,
 3.8B, context 16384 so a 20 GB GPU can load it). `llm/gemma-3-4b` is a second
 GPU recipe. `llm/gemma-2-2b-it` is Gemma 2 2B Instruct on the CPU image
-(context 8192, about 2.6B). A 9B-class model is another folder (see
+(context 8192, about 2.6B). `llm/bitnet-b1.58-2b` is BitNet b1.58 2B 4T
+on bitnet.cpp (context 4096, GGUF about 1.2 GB) and runs beside Gemma.
+`llm/phi-2` is Microsoft Phi-2 (2.7B, context 2048) in `dhara-model-phi-2`. A 9B-class model is another folder (see
 `deploy/model-server/llm/README.md` and the planned row `gemma-2-9b-it` in
 `models.yaml`). Comparison is not a Settings dropdown. Rebuild with a different
 `LLM_MODEL`, set `DHARA_LLM_MODEL` to that id, or run
 `python scripts/compare_llm_backends.py` against `scripts/fixtures/llm_backends.yaml`.
+For the CPU models that stay loaded together, `python scripts/eval_slm.py`
+runs one prompt set on each ready `device: cpu` id and writes
+`scripts/output/slm_eval/latest.json`.
 
 ## Cold start
 

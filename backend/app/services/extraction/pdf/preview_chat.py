@@ -7,6 +7,8 @@ import re
 from typing import Any, Dict, List
 
 from app.services.extraction.pdf.llm_json import loads_llm_json
+from app.services.llm.chat_commands import lines_from_tables, match_stage_command, run_stage_command
+from app.services.llm.profiles import fit_gemma_2b_completion, gemma_2b_json_response_format
 from app.services.extraction.pdf.suggest_search import _catalog_entry, _sanitize_ids
 from app.services.llm_prompts import TABLE_PREVIEW_CHAT_PROMPT
 
@@ -74,6 +76,13 @@ def preview_chat_from_prompt(
     if llm is None:
         raise ValueError("An LLM API key is required in Settings")
 
+    if match_stage_command(text):
+        return run_stage_command(
+            command=text,
+            lines=lines_from_tables(tables),
+            api_key=api_key,
+        )
+
     catalog = [_catalog_entry(t) for t in tables if t.get("table_id") is not None]
     valid_ids = {str(c["table_id"]) for c in catalog if c["table_id"]}
     if not valid_ids:
@@ -88,15 +97,19 @@ def preview_chat_from_prompt(
         prompt=text,
         catalog_json=json.dumps(catalog, ensure_ascii=False),
     )
+    # Large catalogs need a long reply on big models. Gemma 2 2B's context is 8192.
+    user_prompt, max_tokens = fit_gemma_2b_completion(llm.model, user_prompt, 8000)
     client = llm.openai_sdk()
-    resp = client.chat.completions.create(
-        model=llm.model,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": user_prompt}],
-        # Large catalogs + many matching ids can truncate at 2k; keep headroom.
-        max_tokens=8000,
-        temperature=0.2,
-    )
+    create_kwargs = {
+        "model": llm.model,
+        "messages": [{"role": "user", "content": user_prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    }
+    response_format = gemma_2b_json_response_format(llm.model)
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
+    resp = client.chat.completions.create(**create_kwargs)
     raw = llm.completion_text(resp.choices[0].message).strip()
     try:
         data = llm.loads_json(raw, context="preview_chat")
